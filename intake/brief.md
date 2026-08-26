@@ -135,10 +135,10 @@ or a custom interactive dashboard could be built as separate future
 projects consuming the same records, without needing to touch or
 re-ingest anything.
 
-The project itself must be packaged as an installable Hermes skill in
+The project itself must be packaged as an installable agent skill in
 the same repo the build harness writes to (not a separate repo) —
 concretely, a root-level `SKILL.md` (sibling to `harness/` and `app/`)
-that a fresh Hermes session can be pointed at directly (a repo URL or
+that a fresh agent session can be pointed at directly (a repo URL or
 local path) and follow as the actual skill definition: walking a user
 through GitHub/Fulcra authentication, then running the `backfill` and
 `generate` entrypoints against `app/`. This is the same pattern
@@ -147,13 +147,23 @@ were pointed directly at this repo... this file IS the skill
 definition") and the same shape a similarly-scoped prior concept
 apparently used (a root-level `SKILL.md` alongside its implementation
 and build-harness directories) — not a new convention being invented
-here. Explicitly separate from the *build* harness's own SKILL.md
-(the `fulcra-rapid-prototype`/`fulcra-prototype-grill-me` skills used to
+here. The `SKILL.md` is a thin instructional wrapper for agent-driven
+usage, not a hard runtime dependency: `app/`'s actual CLI must remain a
+normal, directly runnable tool (callable by a human with no agent
+involved at all) that works the same way regardless of which agent
+platform is following the `SKILL.md`, or whether an agent is involved
+at all. Nothing about the underlying functionality (GitHub backfill,
+Fulcra records, rollups, narrative generation) should assume Hermes
+specifically, or any other particular agent runtime — Hermes is simply
+the first, concrete environment this will be exercised in. Explicitly
+separate from the *build* harness's own SKILL.md (the
+`fulcra-rapid-prototype`/`fulcra-prototype-grill-me` skills used to
 build this project) — those are build-time tooling, not what an end
 user installs to run their own journey backfill. The concrete
-first-usage test this must support: spin up a fresh VM, install Hermes,
-point it at this project's repo, and say "I want to try this skill
-out" — with no other setup already assumed.
+first-usage test this must support: spin up a fresh VM, install an
+agent runtime (Hermes, for this first test), point it at this
+project's repo, and say "I want to try this skill out" — with no other
+setup already assumed.
 
 ## Process note (why this brief exists in a fresh, isolated context)
 This Intake was run as a deliberate ground-up restart: the user
