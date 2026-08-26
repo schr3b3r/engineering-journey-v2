@@ -13,6 +13,7 @@ class MockFulcraClient:
         self.tags: Dict[str, str] = {}  # tag_name -> tag_uuid
         self.duration_records: List[Dict[str, Any]] = []
         self.moment_records: List[Dict[str, Any]] = []
+        self.numeric_records: List[Dict[str, Any]] = []
 
     def annotations_catalog(self) -> List[Dict[str, Any]]:
         return self.annotations
@@ -60,6 +61,12 @@ class MockFulcraClient:
                 if "id" not in rec_copy or not rec_copy["id"]:
                     rec_copy["id"] = str(uuid.uuid4())
                 self.moment_records.append(rec_copy)
+        elif data_type == "NumericAnnotation":
+            for rec in records:
+                rec_copy = dict(rec)
+                if "id" not in rec_copy or not rec_copy["id"]:
+                    rec_copy["id"] = str(uuid.uuid4())
+                self.numeric_records.append(rec_copy)
         return {"upload_id": str(uuid.uuid4())}
 
     def duration_annotations(
@@ -97,6 +104,25 @@ class MockFulcraClient:
                     continue
             rec_at = rec.get("recorded_at")
             ts = rec_at.get("value") if isinstance(rec_at, dict) else str(rec_at or "")
+            if ts and start_time <= ts <= end_time:
+                matching.append(rec)
+        return matching
+
+    def numeric_annotations(
+        self,
+        start_time: str,
+        end_time: str,
+        source: Optional[str] = None,
+        fulcra_userid: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        matching = []
+        for rec in self.numeric_records:
+            if source:
+                rec_sources = rec.get("sources") or []
+                if source not in rec_sources:
+                    continue
+            rec_at = rec.get("recorded_at")
+            ts = rec_at.get("start_time") if isinstance(rec_at, dict) else str(rec_at or "")
             if ts and start_time <= ts <= end_time:
                 matching.append(rec)
         return matching
