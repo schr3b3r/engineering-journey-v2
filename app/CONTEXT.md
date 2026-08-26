@@ -32,7 +32,7 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
-Milestone M2 completed — Live GitHub API spike and Fulcra agg/day verification complete in `github_spike.py` with test suite passing in `tests/test_github_spike.py`. Core REST API (`/repos/{owner}/{repo}/commits?author=...&per_page=1`) verified as primary existence pre-check to bypass Search API's 30 req/min rate limit bottleneck. Per-item endpoints defined for all 4 in-scope activity types. Fulcra verified not to have a custom record `agg/day` endpoint (HTTP 404).
+Milestone M3 completed — Real raw GitHub activity ingestion implemented in `raw_ingestion.py` using "GitHub Activity Raw" records (`MomentAnnotation` base). Integrated with `CheckpointManager` for resumable backfilling. Records store real event time timestamps in `recorded_at`, tags for `github_activity_raw`, `activity_type`, `repo`, and `github_identity`, and `sources` lineage chains. Tested with full pytest suite in `tests/test_raw_ingestion.py` including real Fulcra integration tests.
 
 See `features/INDEX.md` for the full, structured feature spec — what the
 app is supposed to do, broken into individually-scoped features with
@@ -45,6 +45,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(M3)** "GitHub Activity Raw" records (`MomentAnnotation` base): Ingestion creates per-item records storing real event time in `recorded_at` (never ingestion time), tags for `github_activity_raw`, `activity_type:<type>`, `repo:<owner/repo>`, and `github_identity:<user>`, and lineage `sources` (`[type_source_id, "github:<owner/repo>", "com.fulcradynamics.cli"]`). Integrated with M1's `CheckpointManager` to track cursors and update status to `completed` upon finishing range ingestion.
 - **(M2)** GitHub API existence pre-check strategy: Primary pre-checks use GitHub Core REST API (`GET /repos/{owner}/{repo}/commits?author={github_identity}&since={iso_start}&until={iso_end}&per_page=1`) which consumes standard Core rate limit quota (5,000 req/hr) rather than GitHub Search REST API (`GET /search/commits` or `/search/issues`), which imposes a restrictive 30 req/min limit.
 - **(M2)** Fulcra `agg/day` endpoint spike: Direct HTTP verification on `api.fulcradynamics.com` confirmed that Fulcra does not provide a general-purpose `agg/day` endpoint for custom records (HTTP 404). Existence pre-checks and rollup calculations must be computed programmatically by application logic.
 - **(M1)** Tag length constraint: Fulcra API strictly limits tag names to 30 characters maximum (`String should have at most 30 characters`). `format_tag` helper truncates raw tags longer than 30 characters and appends a 6-character SHA256 hash snippet to guarantee uniqueness and deterministic matching when filtering.
