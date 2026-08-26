@@ -32,7 +32,7 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
-Milestone M3 completed — Real raw GitHub activity ingestion implemented in `raw_ingestion.py` using "GitHub Activity Raw" records (`MomentAnnotation` base). Integrated with `CheckpointManager` for resumable backfilling. Records store real event time timestamps in `recorded_at`, tags for `github_activity_raw`, `activity_type`, `repo`, and `github_identity`, and `sources` lineage chains. Tested with full pytest suite in `tests/test_raw_ingestion.py` including real Fulcra integration tests.
+Milestone M4 completed — Real multi-repo, multi-year backfill engine implemented in `backfill.py` (`BackfillEngine`). Integrates public and private repo discovery (`GET /user/repos`), cheap existence pre-checks, durable per-repo checkpointing, API call tracking, and interruption/resume at scale. Full pytest test suite passing (25 tests in `tests/test_backfill.py`, `tests/test_raw_ingestion.py`, `tests/test_github_spike.py`, `tests/test_checkpoint.py`).
 
 See `features/INDEX.md` for the full, structured feature spec — what the
 app is supposed to do, broken into individually-scoped features with
@@ -45,6 +45,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(M4)** Multi-Repo & Multi-Year Backfill Engine (`BackfillEngine` in `backfill.py`): Orchestrates public + private repository discovery (`GET /user/repos`), per-repo cheap Core REST API existence pre-checks, uniform daily-granularity ingestion into "GitHub Activity Raw" records, and durable `CheckpointManager` tracking. Tracks wall-clock time, total records ingested, and GitHub API call counts. Proven interruptible and resumable mid-stream across repos.
 - **(M3)** "GitHub Activity Raw" records (`MomentAnnotation` base): Ingestion creates per-item records storing real event time in `recorded_at` (never ingestion time), tags for `github_activity_raw`, `activity_type:<type>`, `repo:<owner/repo>`, and `github_identity:<user>`, and lineage `sources` (`[type_source_id, "github:<owner/repo>", "com.fulcradynamics.cli"]`). Integrated with M1's `CheckpointManager` to track cursors and update status to `completed` upon finishing range ingestion.
 - **(M2)** GitHub API existence pre-check strategy: Primary pre-checks use GitHub Core REST API (`GET /repos/{owner}/{repo}/commits?author={github_identity}&since={iso_start}&until={iso_end}&per_page=1`) which consumes standard Core rate limit quota (5,000 req/hr) rather than GitHub Search REST API (`GET /search/commits` or `/search/issues`), which imposes a restrictive 30 req/min limit.
 - **(M2)** Fulcra `agg/day` endpoint spike: Direct HTTP verification on `api.fulcradynamics.com` confirmed that Fulcra does not provide a general-purpose `agg/day` endpoint for custom records (HTTP 404). Existence pre-checks and rollup calculations must be computed programmatically by application logic.

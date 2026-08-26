@@ -1,6 +1,7 @@
 """Tests for GitHub Activity Raw ingestion and querying."""
 
 import json
+import time
 import uuid
 import pytest
 from github_spike import GitHubActivityItem
@@ -291,12 +292,18 @@ def test_real_fulcra_integration() -> None:
     assert count == 1
     assert cp is not None
 
-    queried = ingestor.get_raw_activities(
-        repo=test_repo,
-        github_identity=test_identity,
-        start_time=start_time,
-        end_time=end_time,
-    )
+    queried = []
+    for _ in range(4):
+        queried = ingestor.get_raw_activities(
+            repo=test_repo,
+            github_identity=test_identity,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if len(queried) >= 1:
+            break
+        time.sleep(0.5)
+
     assert len(queried) >= 1
     matched = [q for q in queried if q.item_id == f"live_commit_{run_id}"]
     assert len(matched) == 1
