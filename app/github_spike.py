@@ -56,22 +56,38 @@ class GitHubAPISpike:
     def discover_user_repos(
         self,
         github_identity: str,
-        limit: int = 100,
+        limit: Optional[int] = None,
     ) -> List[str]:
         """Discover public and private repositories accessible by `github_identity`.
 
         Endpoint: GET /user/repos?affiliation=owner,collaborator,organization_member&per_page=100
         Fallback if no auth token: GET /users/{github_identity}/repos
+
+        `limit` defaults to None (no cap -- paginate through everything
+        GitHub returns). A real bug was found and fixed here: a prior
+        default of limit=100 silently truncated discovery for any
+        account with more than 100 accessible repos, which is exactly
+        the "hundreds of org-associated repos" scenario this project
+        exists to handle correctly (confirmed live: a real test account
+        has 312 accessible repos across owner+collaborator+
+        organization_member affiliations -- the old limit=100 default
+        meant real repos with real recent activity, e.g.
+        fulcradynamics/data-service, fulcradynamics/portal,
+        fulcradynamics/user-service, were never even discovered, let
+        alone existence-checked or ingested, silently undercounting a
+        real backfill run). Pass an explicit `limit` only when a caller
+        genuinely wants to bound discovery (e.g. a fast demo/test).
         """
         repos: List[str] = []
 
         if self.token:
             url = f"{self.base_url}/user/repos"
             page = 1
-            while len(repos) < limit:
+            while limit is None or len(repos) < limit:
+                page_size = 100 if limit is None else min(100, limit - len(repos))
                 params = {
                     "affiliation": "owner,collaborator,organization_member",
-                    "per_page": str(min(100, limit - len(repos))),
+                    "per_page": str(page_size),
                     "page": str(page),
                 }
                 try:
@@ -84,6 +100,9 @@ class GitHubAPISpike:
                             full_name = item.get("full_name")
                             if full_name and full_name not in repos:
                                 repos.append(full_name)
+                        if len(batch) < page_size:
+                            # Last page (fewer results than requested).
+                            break
                         page += 1
                     else:
                         break
@@ -92,17 +111,29 @@ class GitHubAPISpike:
         else:
             # Unauthenticated fallback: public repos for the user
             url = f"{self.base_url}/users/{github_identity}/repos"
-            try:
-                r = self._get(url, params={"per_page": str(min(100, limit))})
-                if r.status_code == 200 and isinstance(r.json(), list):
-                    for item in r.json():
-                        full_name = item.get("full_name")
-                        if full_name and full_name not in repos:
-                            repos.append(full_name)
-            except Exception:
-                pass
+            page = 1
+            while limit is None or len(repos) < limit:
+                page_size = 100 if limit is None else min(100, limit - len(repos))
+                try:
+                    r = self._get(url, params={"per_page": str(page_size), "page": str(page)})
+                    if r.status_code == 200 and isinstance(r.json(), list):
+                        batch = r.json()
+                        if not batch:
+                            break
+                        for item in batch:
+                            full_name = item.get("full_name")
+                            if full_name and full_name not in repos:
+                                repos.append(full_name)
+                        if len(batch) < page_size:
+                            break
+                        page += 1
+                    else:
+                        break
+                except Exception:
+                    break
 
         return repos
+
 
     def check_repo_existence(
         self,
