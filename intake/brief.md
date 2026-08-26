@@ -122,12 +122,9 @@ than a synthetic/hypothetical scenario.
 ## Data scope
 All GitHub activity types tied to the authenticated user's own
 contributions: commits, pull requests (opened/merged), PR reviews, and
-issue/PR discussion (comments). Scope boundary questions not yet fully
-resolved (e.g. whether to include GitHub Actions/CI activity, gists,
-wikis, or project-board activity) are still open — a boundary-scope
-question was in progress when this session paused to correct a process
-gap (Fulcra authentication had not yet been confirmed) and needs to be
-revisited before Intake is considered fully closed.
+issue/PR discussion (comments). Explicitly out of scope: GitHub
+Actions/CI run activity, gists, wikis, and project-board (Projects)
+activity — confirmed as a deliberate boundary, not an oversight.
 
 ## Delivery format
 Primary shipped output for this project is the lightweight markdown
