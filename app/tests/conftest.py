@@ -12,6 +12,7 @@ class MockFulcraClient:
         self.annotations: List[Dict[str, Any]] = []
         self.tags: Dict[str, str] = {}  # tag_name -> tag_uuid
         self.duration_records: List[Dict[str, Any]] = []
+        self.moment_records: List[Dict[str, Any]] = []
 
     def annotations_catalog(self) -> List[Dict[str, Any]]:
         return self.annotations
@@ -53,6 +54,12 @@ class MockFulcraClient:
                 if "id" not in rec_copy or not rec_copy["id"]:
                     rec_copy["id"] = str(uuid.uuid4())
                 self.duration_records.append(rec_copy)
+        elif data_type == "MomentAnnotation":
+            for rec in records:
+                rec_copy = dict(rec)
+                if "id" not in rec_copy or not rec_copy["id"]:
+                    rec_copy["id"] = str(uuid.uuid4())
+                self.moment_records.append(rec_copy)
         return {"upload_id": str(uuid.uuid4())}
 
     def duration_annotations(
@@ -70,6 +77,22 @@ class MockFulcraClient:
             r_end = rec_at.get("end_time", "")
             # Simple window overlap check
             if r_start <= end_time and r_end >= start_time:
+                matching.append(rec)
+        return matching
+
+    def moment_annotations(
+        self,
+        start_time: str,
+        end_time: str,
+        source: Optional[str] = None,
+        fulcra_userid: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        # In mock, return moment records that fall within time window
+        matching = []
+        for rec in self.moment_records:
+            rec_at = rec.get("recorded_at")
+            ts = rec_at.get("value") if isinstance(rec_at, dict) else str(rec_at or "")
+            if ts and start_time <= ts <= end_time:
                 matching.append(rec)
         return matching
 
