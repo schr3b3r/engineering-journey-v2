@@ -44,6 +44,13 @@ class NotabilitySignal:
     record_id: Optional[str] = None
     formula_version: str = "v1"
 
+    def get_source_id(self) -> str:
+        """Return record_id if available, otherwise a deterministic notability source identifier."""
+        if self.record_id:
+            return self.record_id
+        repo_part = self.repo or "all"
+        return f"notability:{self.period_type}:{self.github_identity}:{repo_part}:{self.start_time}"
+
     def to_note_dict(self) -> Dict[str, Any]:
         """Convert signal metadata to a dictionary for JSON serialization in `note`."""
         return {
