@@ -69,13 +69,15 @@ class MockFulcraClient:
         source: Optional[str] = None,
         fulcra_userid: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        # In mock, return duration records that fall within or overlap window
         matching = []
         for rec in self.duration_records:
+            if source:
+                rec_sources = rec.get("sources") or []
+                if source not in rec_sources:
+                    continue
             rec_at = rec.get("recorded_at") or {}
             r_start = rec_at.get("start_time", "")
             r_end = rec_at.get("end_time", "")
-            # Simple window overlap check
             if r_start <= end_time and r_end >= start_time:
                 matching.append(rec)
         return matching
@@ -87,9 +89,12 @@ class MockFulcraClient:
         source: Optional[str] = None,
         fulcra_userid: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        # In mock, return moment records that fall within time window
         matching = []
         for rec in self.moment_records:
+            if source:
+                rec_sources = rec.get("sources") or []
+                if source not in rec_sources:
+                    continue
             rec_at = rec.get("recorded_at")
             ts = rec_at.get("value") if isinstance(rec_at, dict) else str(rec_at or "")
             if ts and start_time <= ts <= end_time:
