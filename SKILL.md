@@ -11,6 +11,14 @@ description: Ingest developer GitHub activity into Fulcra as durable custom reco
 
 ## 1. Environment & Prerequisites
 
+**All commands below are run from inside the `app/` directory** (e.g.
+`cd app` first) -- this project's modules use flat, sibling-style
+imports throughout (`from backfill import ...`, not
+`from app.backfill import ...`), consistent with every other module in
+this repo, so the CLI must be invoked as `python cli.py ...` /
+`python main.py ...` from within `app/`, not `python -m app.cli` from
+the repo root.
+
 ### Python Dependencies
 Ensure Python 3.10+ and the required packages are installed:
 ```bash
@@ -21,8 +29,9 @@ pip install -r requirements.txt
 ### Fulcra Credentials
 Fulcra authentication uses the standard SDK configuration. Credentials must exist at `~/.config/fulcra/credentials.json` (or specified via `FULCRA_CREDENTIALS_PATH`):
 ```bash
+cd app
 # Verify Fulcra auth status
-python -m app.cli auth
+python cli.py auth
 ```
 
 ### GitHub Credentials
@@ -32,43 +41,44 @@ GitHub authentication defaults to browser-based OAuth device-code flow per RFC 8
 
 ## 2. Command-Line Interface (CLI) Usage
 
-The application provides a standalone CLI with zero hard agent dependencies.
+The application provides a standalone CLI with zero hard agent dependencies. Run every command below from inside `app/` (`cd app` first).
 
 ### Quick Start: Run Full Pipeline
 To run the complete sequence (Backfill -> Activity Rollups -> Notability Signals -> Task Prompt Summarization -> Narrative Generation):
 ```bash
-python -m app.cli pipeline --years 1.0 --yes
+cd app
+python cli.py pipeline --years 1.0 --yes
 ```
 
 ### Step-by-Step CLI Commands
 
 #### 1. Authentication Status
 ```bash
-python -m app.cli auth [--yes] [--device-code]
+python cli.py auth [--yes] [--device-code]
 ```
 
 #### 2. Raw GitHub Activity Backfill
 Ingests commits, PR opens/merges, PR reviews, and issue/PR comments into "GitHub Activity Raw" (`MomentAnnotation`) records with real event-time `recorded_at` timestamps, existence pre-checks, and durable `CheckpointManager` tracking:
 ```bash
-python -m app.cli backfill --years 1.0 --identity <username> --yes
+python cli.py backfill --years 1.0 --identity <username> --yes
 ```
 
 #### 3. Precompute Activity Rollups & Notability Signals
 Aggregates activity counts into day/week/month/quarter/year "Activity Rollup" (`DurationAnnotation`) records and computes statistical baseline comparison "Notability Signal" (`NumericAnnotation`) records:
 ```bash
-python -m app.cli rollup --years 1.0 --identity <username>
+python cli.py rollup --years 1.0 --identity <username>
 ```
 
 #### 4. Rollup Summarization Prompting
 Generates structured task prompts for model-driven period summarization write-backs:
 ```bash
-python -m app.cli summarize --years 1.0 --identity <username>
+python cli.py summarize --years 1.0 --identity <username>
 ```
 
 #### 5. Markdown Narrative Generation
 Generates a paced narrative story document with a Provenance Appendix for a specified range ("full", "1y", "2024", etc.):
 ```bash
-python -m app.cli narrative --range full --identity <username> --output my_story.md
+python cli.py narrative --range full --identity <username> --output my_story.md
 ```
 
 ---
