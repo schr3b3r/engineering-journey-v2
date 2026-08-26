@@ -139,8 +139,30 @@ class RawActivityIngestor:
             end_time=end_time,
         )
 
+        # BUG FIX (found via a real kill/resume run against a live GitHub
+        # account, M4): get_latest_checkpoint's start_time/end_time args
+        # only bound the *query* window used to look up checkpoint
+        # records -- they do NOT guarantee the returned checkpoint's own
+        # covered range actually matches the range being requested here.
+        # A checkpoint from an earlier, wider (or otherwise different)
+        # real backfill run for the same repo+identity was being reused
+        # as if it applied to this call's specific start_time/end_time,
+        # causing ingest_items to wrongly short-circuit to "0 ingested,
+        # already completed" for a range that was never actually
+        # processed. Only trust a "completed" checkpoint here if its own
+        # stored range genuinely covers the requested range -- the same
+        # check CheckpointManager.is_range_covered() already implements
+        # correctly; reuse that logic rather than trusting whatever
+        # get_latest_checkpoint happened to return.
         if latest_cp and latest_cp.status == "completed":
-            return 0, latest_cp
+            covers_requested_range = (
+                latest_cp.start_time <= start_time and latest_cp.end_time >= end_time
+            )
+            if covers_requested_range:
+                return 0, latest_cp
+            # Not actually a match for this request -- treat as no prior
+            # checkpoint for this specific range rather than as "done."
+            latest_cp = None
 
         last_cursor = latest_cp.cursor if latest_cp else None
         remaining_items = items

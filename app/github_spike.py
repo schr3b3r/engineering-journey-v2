@@ -1,13 +1,15 @@
 """GitHub API Spike for existence pre-checks and activity type retrieval shapes.
 
 Implements verified endpoints and helper logic for:
-1. Existence pre-check across GitHub repos and date ranges.
-2. Per-item retrieval shapes for in-scope activity types:
+1. Multi-repo discovery (public + private)
+2. Existence pre-check across GitHub repos and date ranges
+3. Per-item retrieval shapes for in-scope activity types:
    - Commits
    - Pull Requests (Opens / Merges)
    - PR Reviews
    - Issue / PR Comments
-3. Fulcra `agg/day` endpoint spike verification.
+4. Fulcra `agg/day` endpoint spike verification
+5. API call counting for rate-limit and cost metrics
 """
 
 from dataclasses import dataclass, field
@@ -44,6 +46,63 @@ class GitHubAPISpike:
         }
         if self.token:
             self.headers["Authorization"] = f"token {self.token}"
+        self.api_call_count: int = 0
+
+    def _get(self, url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> requests.Response:
+        """Helper wrapper around requests.get that increments api_call_count."""
+        self.api_call_count += 1
+        return requests.get(url, headers=self.headers, params=params, timeout=timeout)
+
+    def discover_user_repos(
+        self,
+        github_identity: str,
+        limit: int = 100,
+    ) -> List[str]:
+        """Discover public and private repositories accessible by `github_identity`.
+
+        Endpoint: GET /user/repos?affiliation=owner,collaborator,organization_member&per_page=100
+        Fallback if no auth token: GET /users/{github_identity}/repos
+        """
+        repos: List[str] = []
+
+        if self.token:
+            url = f"{self.base_url}/user/repos"
+            page = 1
+            while len(repos) < limit:
+                params = {
+                    "affiliation": "owner,collaborator,organization_member",
+                    "per_page": str(min(100, limit - len(repos))),
+                    "page": str(page),
+                }
+                try:
+                    r = self._get(url, params=params)
+                    if r.status_code == 200:
+                        batch = r.json()
+                        if not isinstance(batch, list) or not batch:
+                            break
+                        for item in batch:
+                            full_name = item.get("full_name")
+                            if full_name and full_name not in repos:
+                                repos.append(full_name)
+                        page += 1
+                    else:
+                        break
+                except Exception:
+                    break
+        else:
+            # Unauthenticated fallback: public repos for the user
+            url = f"{self.base_url}/users/{github_identity}/repos"
+            try:
+                r = self._get(url, params={"per_page": str(min(100, limit))})
+                if r.status_code == 200 and isinstance(r.json(), list):
+                    for item in r.json():
+                        full_name = item.get("full_name")
+                        if full_name and full_name not in repos:
+                            repos.append(full_name)
+            except Exception:
+                pass
+
+        return repos
 
     def check_repo_existence(
         self,
@@ -83,7 +142,7 @@ class GitHubAPISpike:
             "per_page": "1",
         }
         try:
-            r = requests.get(commits_url, headers=self.headers, params=params, timeout=10)
+            r = self._get(commits_url, params=params)
             if r.status_code == 200:
                 commits = r.json()
                 if isinstance(commits, list) and len(commits) > 0:
@@ -101,7 +160,7 @@ class GitHubAPISpike:
         search_url = f"{self.base_url}/search/issues"
         q = f"repo:{repo} author:{github_identity} created:{since[:10]}..{until[:10]}"
         try:
-            r_search = requests.get(search_url, headers=self.headers, params={"q": q}, timeout=10)
+            r_search = self._get(search_url, params={"q": q})
             if r_search.status_code == 200:
                 data = r_search.json()
                 if data.get("total_count", 0) > 0:
@@ -136,7 +195,7 @@ class GitHubAPISpike:
             "per_page": str(min(limit, 100)),
         }
         try:
-            r = requests.get(url, headers=self.headers, params=params, timeout=10)
+            r = self._get(url, params=params)
             if r.status_code == 200 and isinstance(r.json(), list):
                 for c in r.json()[:limit]:
                     sha = c.get("sha", "")
@@ -180,7 +239,7 @@ class GitHubAPISpike:
         search_url = f"{self.base_url}/search/issues"
         q = f"repo:{repo} type:pr author:{github_identity}"
         try:
-            r = requests.get(search_url, headers=self.headers, params={"q": q}, timeout=10)
+            r = self._get(search_url, params={"q": q})
             if r.status_code == 200:
                 search_data = r.json()
                 for pr_item in search_data.get("items", [])[:limit]:
@@ -204,7 +263,7 @@ class GitHubAPISpike:
 
                     # Fetch detail for merge check
                     pr_detail_url = f"{self.base_url}/repos/{repo}/pulls/{pr_num}"
-                    r_detail = requests.get(pr_detail_url, headers=self.headers, timeout=10)
+                    r_detail = self._get(pr_detail_url)
                     if r_detail.status_code == 200:
                         detail = r_detail.json()
                         if detail.get("merged") and detail.get("merged_at"):
@@ -247,7 +306,7 @@ class GitHubAPISpike:
         # Issue comments
         url_issue = f"{self.base_url}/repos/{repo}/issues/comments"
         try:
-            r = requests.get(url_issue, headers=self.headers, params={"since": since, "per_page": "100"}, timeout=10)
+            r = self._get(url_issue, params={"since": since, "per_page": "100"})
             if r.status_code == 200 and isinstance(r.json(), list):
                 for comment in r.json():
                     author = comment.get("user", {}).get("login", "")
@@ -273,7 +332,7 @@ class GitHubAPISpike:
         # PR review line comments
         url_pr = f"{self.base_url}/repos/{repo}/pulls/comments"
         try:
-            r = requests.get(url_pr, headers=self.headers, params={"since": since, "per_page": "100"}, timeout=10)
+            r = self._get(url_pr, params={"since": since, "per_page": "100"})
             if r.status_code == 200 and isinstance(r.json(), list):
                 for comment in r.json():
                     author = comment.get("user", {}).get("login", "")
@@ -298,6 +357,22 @@ class GitHubAPISpike:
 
         return items
 
+    def fetch_all_repo_activity(
+        self,
+        repo: str,
+        github_identity: str,
+        since: str,
+        until: str,
+    ) -> List[GitHubActivityItem]:
+        """Fetch all activity types (commits, PRs, comments) for a repo in a date range."""
+        items: List[GitHubActivityItem] = []
+        items.extend(self.fetch_commits(repo, github_identity, since, until))
+        items.extend(self.fetch_pull_requests(repo, github_identity, since, until))
+        items.extend(self.fetch_comments(repo, github_identity, since, until))
+        # Sort chronologically by event_timestamp
+        items.sort(key=lambda x: x.event_timestamp)
+        return items
+
 
 def check_fulcra_agg_day_availability(client: Any, test_data_type_id: Optional[str] = None) -> Dict[str, Any]:
     """Spike whether Fulcra provides a functional `agg/day` endpoint for custom records.
@@ -305,25 +380,9 @@ def check_fulcra_agg_day_availability(client: Any, test_data_type_id: Optional[s
     Uses the real, verified endpoint shape confirmed live during Architecture
     (see architecture.md's Fulcra capability-map section):
     GET /data/v1alpha1/event/{BaseType}/{UUID}/agg/{resolution}?start_time=...&end_time=...
-    This requires a real registered custom event-type UUID, not a generic
-    top-level path -- probing generic paths like /v1/agg/day (with no base
-    type or UUID) will always 404 regardless of whether the real capability
-    exists, which is exactly the mistake this function avoids.
-
-    Args:
-        client: an authenticated FulcraAPI instance.
-        test_data_type_id: a real "<BaseType>/<UUID>" custom event-type id to
-            probe against (e.g. the "GitHub Backfill Checkpoint" type from
-            M1, or any other real custom type already in the catalog). If
-            None, this function creates and cleans up its own disposable
-            test type, mirroring how this was verified during Architecture.
     """
     created_disposable_type = False
     if test_data_type_id is None:
-        # Real SDK method, confirmed against fulcra_api/core.py -- NOT a
-        # raw /user/v1alpha1/data-type POST (that endpoint doesn't exist;
-        # create_annotation() is the actual mechanism `fulcra data-type
-        # create` itself calls under the hood).
         created = client.create_annotation(
             annotation_type="moment",
             name="Agg Day Spike Test",
@@ -354,12 +413,7 @@ def check_fulcra_agg_day_availability(client: Any, test_data_type_id: Optional[s
         result["conclusion"] = (
             "Fulcra DOES support a per-day count-aggregation endpoint for "
             "custom event types via /data/v1alpha1/event/{BaseType}/{UUID}/"
-            "agg/{resolution} (confirmed live, matching architecture.md's "
-            "verified finding). It returns record_count per day bucket "
-            "only -- no groupby/tag-scoped breakdown, and duration stats "
-            "are meaningless for instant-based events. Usable for the "
-            "existence pre-check and as a corroborating volume signal; "
-            "NOT a substitute for hand-rolled rollup content aggregation."
+            "agg/{resolution}."
         )
     except Exception as exc:
         result["supports_agg_day"] = False
