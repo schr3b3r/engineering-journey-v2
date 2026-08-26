@@ -433,7 +433,7 @@ class RollupEngine:
         records = self.client.duration_annotations(
             start_time=start_time, end_time=end_time, source=type_source_id
         )
-        rollups: List[ActivityRollup] = []
+        raw_rollups: List[ActivityRollup] = []
 
         for rec in records:
             raw_tags = rec.get("tags") or []
@@ -462,7 +462,24 @@ class RollupEngine:
                     and rollup.github_identity != github_identity
                 ):
                     continue
-                rollups.append(rollup)
+                raw_rollups.append(rollup)
 
+        # Deduplicate rollups by key (period_type, repo, github_identity, start_time),
+        # preferring records with summary_text set or later record writes.
+        by_key: Dict[Tuple[str, Optional[str], str, str], ActivityRollup] = {}
+        for r in raw_rollups:
+            key = (r.period_type, r.repo, r.github_identity, r.start_time)
+            if key not in by_key:
+                by_key[key] = r
+            else:
+                existing = by_key[key]
+                if r.summary_text and not existing.summary_text:
+                    by_key[key] = r
+                elif r.summary_text and existing.summary_text:
+                    by_key[key] = r
+                elif not existing.summary_text:
+                    by_key[key] = r
+
+        rollups = list(by_key.values())
         rollups.sort(key=lambda r: r.start_time)
         return rollups
