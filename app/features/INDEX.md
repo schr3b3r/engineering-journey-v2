@@ -16,6 +16,7 @@ status changes.
 | [m7_rollup_summarization.md](m7_rollup_summarization.md) | done | Harness-side rollup summarization with task-prompt shaping, structured handoff, and deterministic write-back |
 | [m8_notability_signal.md](m8_notability_signal.md) | done | First-pass notability signal formula using NumericAnnotation custom records, score in value, and baseline comparison in note |
 | [m9_narrative_generation.md](m9_narrative_generation.md) | done | Markdown narrative generator reading rollups+signals, producing paced markdown with provenance appendix |
+| [m10_packaging.md](m10_packaging.md) | done | Installable, agent-agnostic skill packaging: root SKILL.md, runnable app/ CLI, OAuth device flow with gh confirmation |
 
 ## Status values
 - `not_started` — described but no work done yet.
