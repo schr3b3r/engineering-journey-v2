@@ -179,7 +179,52 @@ class CheckpointManager:
         resp = self.client.record_data_type(
             "DurationAnnotation", [record], api_version="v1alpha1"
         )
+
+        # Read-after-write consistency guard, found necessary via a real
+        # bug: a fast, sequential real script (M5's backward/forward
+        # extension demo) wrote a "completed" checkpoint in one step, then
+        # immediately called get_uncovered_ranges() in the next step,
+        # which queries Fulcra fresh via get_checkpoints() -- and
+        # sometimes did not yet see the checkpoint just written (Fulcra's
+        # write path is not guaranteed instantaneously read-consistent).
+        # That caused get_uncovered_ranges() to treat an already-covered
+        # sub-range as still uncovered, leading to a real duplicate
+        # ingestion of an already-processed item. Poll briefly for the
+        # just-written checkpoint to become visible before returning, so
+        # any caller relying on read-your-writes (like
+        # get_uncovered_ranges) gets a consistent view without needing
+        # its own retry logic.
+        if checkpoint.status == "completed":
+            self._wait_for_checkpoint_visible(checkpoint)
+
         return resp
+
+    def _wait_for_checkpoint_visible(
+        self, checkpoint: "Checkpoint", max_attempts: int = 6, delay_seconds: float = 0.5
+    ) -> bool:
+        """Poll get_checkpoints() briefly until a just-saved checkpoint is
+        visible, tolerating Fulcra's eventual-consistency write path.
+        Returns True if it became visible within the attempt budget,
+        False otherwise (never raises -- a caller that queries
+        immediately after will simply see the same staleness this was
+        trying to avoid, which is a graceful degradation, not silent
+        data loss, since the record genuinely was written)."""
+        import time
+
+        for _ in range(max_attempts):
+            existing = self.get_checkpoints(
+                repo=checkpoint.repo, github_identity=checkpoint.github_identity
+            )
+            for cp in existing:
+                if (
+                    cp.start_time == checkpoint.start_time
+                    and cp.end_time == checkpoint.end_time
+                    and cp.status == checkpoint.status
+                    and cp.cursor == checkpoint.cursor
+                ):
+                    return True
+            time.sleep(delay_seconds)
+        return False
 
     def get_checkpoints(
         self,

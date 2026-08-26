@@ -221,3 +221,67 @@ def test_real_fulcra_integration() -> None:
 
     save_resp = mgr.save_checkpoint(cp)
     assert "upload_id" in save_resp
+
+
+def test_save_checkpoint_waits_for_completed_checkpoint_visibility(mock_fulcra_client) -> None:
+    """Regression test for a real bug found via a live M5 backward/forward
+    extension run: save_checkpoint() must poll until a just-saved
+    'completed' checkpoint is actually visible via get_checkpoints()
+    before returning, tolerating Fulcra's real eventual-consistency write
+    path. Without this, a fast, sequential caller (e.g.
+    get_uncovered_ranges() immediately after a prior extension step's
+    completed checkpoint write) could see stale state and wrongly treat
+    an already-covered sub-range as still uncovered, causing real
+    duplicate ingestion -- exactly what a real run of
+    real_m5_extension.py against a live Fulcra account originally
+    surfaced (3 distinct items became 4 stored records)."""
+    mgr = CheckpointManager(mock_fulcra_client)
+    repo = "owner/visibility-test-repo"
+    identity = "some-user"
+
+    cp = Checkpoint(
+        repo=repo,
+        github_identity=identity,
+        start_time="2024-01-01T00:00:00Z",
+        end_time="2024-12-31T23:59:59Z",
+        status="completed",
+        cursor="commit_final",
+        items_processed=1,
+    )
+    mgr.save_checkpoint(cp)
+
+    # Immediately after save_checkpoint() returns, the checkpoint must
+    # already be visible to a fresh query -- this is the property that
+    # was missing before the fix (against a real backend with real write
+    # latency; the in-memory mock is instantaneous either way, so this
+    # test exercises the polling/matching logic itself directly rather
+    # than a real network race).
+    visible = mgr._wait_for_checkpoint_visible(cp, max_attempts=1, delay_seconds=0)
+    assert visible is True
+
+    uncovered = mgr.get_uncovered_ranges(
+        repo=repo,
+        github_identity=identity,
+        start_time="2024-01-01T00:00:00Z",
+        end_time="2024-12-31T23:59:59Z",
+    )
+    assert uncovered == [], "The just-saved completed checkpoint's own range must read back as fully covered"
+
+
+def test_wait_for_checkpoint_visible_returns_false_without_raising_when_never_visible(mock_fulcra_client) -> None:
+    """_wait_for_checkpoint_visible() must degrade gracefully (return
+    False) rather than raise if a checkpoint genuinely never becomes
+    visible within its bounded attempt budget -- the record write itself
+    already happened for real, so this is a visibility-timing signal,
+    not a data-loss condition, and must not crash a real backfill run."""
+    mgr = CheckpointManager(mock_fulcra_client)
+    phantom_cp = Checkpoint(
+        repo="owner/never-saved-repo",
+        github_identity="nobody",
+        start_time="2020-01-01T00:00:00Z",
+        end_time="2020-01-02T00:00:00Z",
+        status="completed",
+        cursor="phantom",
+    )
+    result = mgr._wait_for_checkpoint_visible(phantom_cp, max_attempts=2, delay_seconds=0)
+    assert result is False
