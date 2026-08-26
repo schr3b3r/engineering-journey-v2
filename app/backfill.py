@@ -1,8 +1,8 @@
 """Multi-Repo Multi-Year GitHub Activity Backfill Engine.
 
 Orchestrates multi-repo discovery, existence pre-checks, uniform daily-granularity
-ingestion, durable checkpointing, interruption/resumability, and volume/cost/performance
-metrics measurement for 1/2/3-year windows.
+ingestion, durable checkpointing, interruption/resumability, backward/forward extension,
+and volume/cost/performance metrics measurement for 1/2/3-year windows.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -64,6 +64,7 @@ class BackfillEngine:
         Uses existence pre-checks to skip repos without activity in the window.
         Tracks wall-clock time, total records ingested, and GitHub API call count.
         Supports `kill_after_n_records` to simulate process termination mid-backfill.
+        Handles backward/forward extension without reprocessing already-covered ranges.
 
         Returns:
             Dict containing execution summary and performance metrics.
@@ -92,64 +93,73 @@ class BackfillEngine:
             if interrupted:
                 break
 
-            # 2a: Check if range is already covered by a completed checkpoint
-            if self.checkpoint_manager.is_range_covered(
+            # 2a: Calculate sub-ranges not yet covered by completed checkpoints
+            uncovered_ranges = self.checkpoint_manager.get_uncovered_ranges(
                 repo=repo,
                 github_identity=github_identity,
                 start_time=start_time,
                 end_time=end_time,
-            ):
+            )
+
+            if not uncovered_ranges:
                 repos_covered.append(repo)
                 continue
 
-            # 2b: Cheap existence pre-check
-            precheck = self.github_api.check_repo_existence(
-                repo=repo,
-                github_identity=github_identity,
-                since=start_time,
-                until=end_time,
-            )
+            for sub_start, sub_end in uncovered_ranges:
+                if interrupted:
+                    break
 
-            if not precheck.get("has_activity"):
-                # Mark repo as completed with 0 items so future runs skip pre-check
-                cp = Checkpoint(
+                # 2b: Cheap existence pre-check for uncovered range
+                precheck = self.github_api.check_repo_existence(
                     repo=repo,
                     github_identity=github_identity,
-                    start_time=start_time,
-                    end_time=end_time,
-                    status="completed",
-                    items_processed=0,
+                    since=sub_start,
+                    until=sub_end,
                 )
-                self.checkpoint_manager.save_checkpoint(cp)
-                repos_no_activity.append(repo)
-                continue
 
-            # 2c: Activity found — fetch items and ingest
-            repos_active.append(repo)
-            items = self.github_api.fetch_all_repo_activity(
-                repo=repo,
-                github_identity=github_identity,
-                since=start_time,
-                until=end_time,
-            )
+                if not precheck.get("has_activity"):
+                    # Mark subrange as completed with 0 items so future runs skip pre-check
+                    cp = Checkpoint(
+                        repo=repo,
+                        github_identity=github_identity,
+                        start_time=sub_start,
+                        end_time=sub_end,
+                        status="completed",
+                        items_processed=0,
+                    )
+                    self.checkpoint_manager.save_checkpoint(cp)
+                    if repo not in repos_no_activity and repo not in repos_active:
+                        repos_no_activity.append(repo)
+                    continue
 
-            ingest_limit = remaining_kill_budget if remaining_kill_budget is not None else None
-            count, latest_cp = self.raw_ingestor.ingest_items(
-                items=items,
-                repo=repo,
-                github_identity=github_identity,
-                start_time=start_time,
-                end_time=end_time,
-                kill_after_n=ingest_limit,
-            )
+                if repo not in repos_active:
+                    repos_active.append(repo)
 
-            total_records_ingested += count
+                # 2c: Activity found — fetch items and ingest for subrange
+                items = self.github_api.fetch_all_repo_activity(
+                    repo=repo,
+                    github_identity=github_identity,
+                    since=sub_start,
+                    until=sub_end,
+                )
 
-            if remaining_kill_budget is not None:
-                remaining_kill_budget -= count
-                if remaining_kill_budget <= 0:
-                    interrupted = True
-                    break
+                ingest_limit = remaining_kill_budget if remaining_kill_budget is not None else None
+                count, latest_cp = self.raw_ingestor.ingest_items(
+                    items=items,
+                    repo=repo,
+                    github_identity=github_identity,
+                    start_time=sub_start,
+                    end_time=sub_end,
+                    kill_after_n=ingest_limit,
+                )
+
+                total_records_ingested += count
+
+                if remaining_kill_budget is not None:
+                    remaining_kill_budget -= count
+                    if remaining_kill_budget <= 0:
+                        interrupted = True
+                        break
 
         elapsed_wall_time = time.perf_counter() - start_wall_time
         total_api_calls = self.github_api.api_call_count - start_api_calls

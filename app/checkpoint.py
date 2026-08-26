@@ -30,6 +30,23 @@ def format_tag(raw: str) -> str:
     return f"{raw[:23]}_{hash_suffix}"
 
 
+def parse_iso(iso_str: str) -> datetime:
+    """Parse ISO 8601 string into a UTC datetime."""
+    if not iso_str:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if iso_str.endswith("Z"):
+        return datetime.fromisoformat(iso_str[:-1] + "+00:00")
+    dt = datetime.fromisoformat(iso_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def format_iso(dt: datetime) -> str:
+    """Format UTC datetime into ISO 8601 string with 'Z' suffix."""
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 @dataclass
 class Checkpoint:
     """Represents a backfill checkpoint for a single repo and identity."""
@@ -162,7 +179,52 @@ class CheckpointManager:
         resp = self.client.record_data_type(
             "DurationAnnotation", [record], api_version="v1alpha1"
         )
+
+        # Read-after-write consistency guard, found necessary via a real
+        # bug: a fast, sequential real script (M5's backward/forward
+        # extension demo) wrote a "completed" checkpoint in one step, then
+        # immediately called get_uncovered_ranges() in the next step,
+        # which queries Fulcra fresh via get_checkpoints() -- and
+        # sometimes did not yet see the checkpoint just written (Fulcra's
+        # write path is not guaranteed instantaneously read-consistent).
+        # That caused get_uncovered_ranges() to treat an already-covered
+        # sub-range as still uncovered, leading to a real duplicate
+        # ingestion of an already-processed item. Poll briefly for the
+        # just-written checkpoint to become visible before returning, so
+        # any caller relying on read-your-writes (like
+        # get_uncovered_ranges) gets a consistent view without needing
+        # its own retry logic.
+        if checkpoint.status == "completed":
+            self._wait_for_checkpoint_visible(checkpoint)
+
         return resp
+
+    def _wait_for_checkpoint_visible(
+        self, checkpoint: "Checkpoint", max_attempts: int = 6, delay_seconds: float = 0.5
+    ) -> bool:
+        """Poll get_checkpoints() briefly until a just-saved checkpoint is
+        visible, tolerating Fulcra's eventual-consistency write path.
+        Returns True if it became visible within the attempt budget,
+        False otherwise (never raises -- a caller that queries
+        immediately after will simply see the same staleness this was
+        trying to avoid, which is a graceful degradation, not silent
+        data loss, since the record genuinely was written)."""
+        import time
+
+        for _ in range(max_attempts):
+            existing = self.get_checkpoints(
+                repo=checkpoint.repo, github_identity=checkpoint.github_identity
+            )
+            for cp in existing:
+                if (
+                    cp.start_time == checkpoint.start_time
+                    and cp.end_time == checkpoint.end_time
+                    and cp.status == checkpoint.status
+                    and cp.cursor == checkpoint.cursor
+                ):
+                    return True
+            time.sleep(delay_seconds)
+        return False
 
     def get_checkpoints(
         self,
@@ -223,6 +285,55 @@ class CheckpointManager:
         )
         return checkpoints[0] if checkpoints else None
 
+    def get_uncovered_ranges(
+        self,
+        repo: str,
+        github_identity: str,
+        start_time: str,
+        end_time: str,
+    ) -> List[Tuple[str, str]]:
+        """Return a list of (start_time, end_time) ISO string tuples representing sub-ranges
+        within [start_time, end_time] that are not covered by any completed checkpoint for
+        this repo and identity.
+        """
+        checkpoints = self.get_checkpoints(repo=repo, github_identity=github_identity)
+        completed = [c for c in checkpoints if c.status == "completed"]
+
+        target_start = parse_iso(start_time)
+        target_end = parse_iso(end_time)
+
+        if target_start >= target_end:
+            return []
+
+        intervals: List[Tuple[datetime, datetime]] = [(target_start, target_end)]
+
+        for cp in completed:
+            if not cp.start_time or not cp.end_time:
+                continue
+            cp_start = parse_iso(cp.start_time)
+            cp_end = parse_iso(cp.end_time)
+
+            next_intervals: List[Tuple[datetime, datetime]] = []
+            for s, e in intervals:
+                if cp_end <= s or cp_start >= e:
+                    # No overlap
+                    next_intervals.append((s, e))
+                else:
+                    # Overlap: keep parts before cp_start and after cp_end
+                    if cp_start > s:
+                        next_intervals.append((s, cp_start))
+                    if cp_end < e:
+                        next_intervals.append((cp_end, e))
+            intervals = next_intervals
+
+        # Format remaining non-empty intervals back to ISO strings
+        res: List[Tuple[str, str]] = []
+        for s, e in intervals:
+            if (e - s).total_seconds() >= 1:
+                res.append((format_iso(s), format_iso(e)))
+
+        return res
+
     def is_range_covered(
         self,
         repo: str,
@@ -230,15 +341,14 @@ class CheckpointManager:
         start_time: str,
         end_time: str,
     ) -> bool:
-        """Check if a date range for a repo and identity is covered by a completed checkpoint."""
-        checkpoints = self.get_checkpoints(
-            repo=repo, github_identity=github_identity
+        """Check if a date range for a repo and identity is covered by completed checkpoint(s)."""
+        uncovered = self.get_uncovered_ranges(
+            repo=repo,
+            github_identity=github_identity,
+            start_time=start_time,
+            end_time=end_time,
         )
-        completed = [c for c in checkpoints if c.status == "completed"]
-        for cp in completed:
-            if cp.start_time <= start_time and cp.end_time >= end_time:
-                return True
-        return False
+        return len(uncovered) == 0
 
 
 class FakeWorkItemProcessor:
