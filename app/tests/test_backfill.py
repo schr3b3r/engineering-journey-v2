@@ -1,5 +1,6 @@
 """Tests for multi-repo multi-year backfill engine, existence pre-checks, metrics, and resumability."""
 
+import os
 import uuid
 from typing import List
 import pytest
@@ -370,6 +371,9 @@ def test_dual_extension_and_re_run_noop(mock_fulcra_client) -> None:
 
 def test_real_fulcra_multi_repo_integration() -> None:
     """Integration test against real Fulcra API (if authenticated)."""
+    if os.environ.get("RUN_LIVE_TESTS") != "1":
+        pytest.skip("Skipping live network test by default. Set RUN_LIVE_TESTS=1 to run.")
+
     try:
         client = get_fulcra_client()
     except Exception as exc:

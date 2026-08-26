@@ -1,6 +1,7 @@
 """Tests for Activity Rollup precomputation, hand-rolled aggregation, and Fulcra storage."""
 
 import json
+import os
 import time
 import uuid
 import pytest
@@ -208,6 +209,9 @@ def test_save_and_query_rollups(mock_fulcra_client) -> None:
 
 def test_real_fulcra_integration() -> None:
     """Integration test against real Fulcra API (if authenticated)."""
+    if os.environ.get("RUN_LIVE_TESTS") != "1":
+        pytest.skip("Skipping live network test by default. Set RUN_LIVE_TESTS=1 to run.")
+
     try:
         client = get_fulcra_client()
     except Exception as exc:

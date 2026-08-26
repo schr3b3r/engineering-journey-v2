@@ -13,6 +13,7 @@ status changes.
 | [m4_multi_repo_backfill.md](m4_multi_repo_backfill.md) | done | Multi-repo discovery and uniform daily-granularity backfill across multi-year windows with existence pre-checks, resumability, and performance metrics |
 | [m5_backward_forward_extension.md](m5_backward_forward_extension.md) | done | Backward/forward extension of existing backfills into past/future without reprocessing or duplicating already-covered ranges |
 | [m6_activity_rollups.md](m6_activity_rollups.md) | done | Precomputed day/week/month/quarter/year activity rollups with hand-rolled aggregation and provenance chains |
+| [m7_rollup_summarization.md](m7_rollup_summarization.md) | done | Harness-side rollup summarization with task-prompt shaping, structured handoff, and deterministic write-back |
 
 ## Status values
 - `not_started` — described but no work done yet.

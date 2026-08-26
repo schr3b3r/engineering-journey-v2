@@ -1,6 +1,7 @@
 """Tests for GitHub Activity Raw ingestion and querying."""
 
 import json
+import os
 import time
 import uuid
 import pytest
@@ -261,6 +262,9 @@ def test_activity_type_filtering(mock_fulcra_client) -> None:
 
 def test_real_fulcra_integration() -> None:
     """Integration test against real Fulcra API (if authenticated)."""
+    if os.environ.get("RUN_LIVE_TESTS") != "1":
+        pytest.skip("Skipping live network test by default. Set RUN_LIVE_TESTS=1 to run.")
+
     try:
         client = get_fulcra_client()
     except Exception as exc:
@@ -312,26 +316,7 @@ def test_real_fulcra_integration() -> None:
 
 def test_ingest_items_does_not_treat_unrelated_range_checkpoint_as_covering(mock_fulcra_client) -> None:
     """Regression test for a real bug found during a live M4 kill/resume
-    run against a real GitHub account: a 'completed' checkpoint whose own
-    stored range OVERLAPS a newly requested range but does not fully
-    COVER it (e.g. checkpoint ends at 17:07, new request ends at 17:24 --
-    17 minutes later) was being treated as if it satisfied the new
-    request, causing ingest_items to wrongly report 0 items ingested for
-    time that was never actually processed. Only a checkpoint whose own
-    stored range genuinely covers [start_time, end_time] may
-    short-circuit ingestion -- overlap alone is not enough.
-
-    Deliberately uses ranges that OVERLAP (so the mock client's own
-    duration_annotations() overlap-based query still returns the
-    checkpoint as a candidate -- see MockFulcraClient.duration_annotations
-    in conftest.py) but where the checkpoint's own end_time falls short
-    of the newly requested end_time. A non-overlapping-range version of
-    this test would pass even with the bug present, since the mock query
-    itself would already exclude the unrelated checkpoint before
-    ingest_items' own covers-check ever ran -- which is exactly why an
-    earlier version of this test using non-overlapping ranges failed to
-    catch the real bug when checked against a deliberately-reintroduced
-    buggy version of the fix.
+    run against a real GitHub account.
     """
     ingestor = RawActivityIngestor(mock_fulcra_client)
     repo = "owner/repo"
@@ -345,11 +330,6 @@ def test_ingest_items_does_not_treat_unrelated_range_checkpoint_as_covering(mock
     assert count == 1
     assert cp.status == "completed"
 
-    # A later request whose range OVERLAPS the completed checkpoint's
-    # range (so the mock's overlap-based query still returns it as a
-    # candidate) but extends well past it -- the checkpoint does NOT
-    # actually cover this full request, so it must not be treated as
-    # already-done.
     second_start, second_end = "2025-01-01T00:00:00Z", "2025-12-31T23:59:59Z"
     second_items = [
         GitHubActivityItem("commit", repo, identity, "first_sha_1", "2025-03-01T00:00:00Z", "first commit", ""),
@@ -357,13 +337,6 @@ def test_ingest_items_does_not_treat_unrelated_range_checkpoint_as_covering(mock
     ]
     count2, cp2 = ingestor.ingest_items(second_items, repo, identity, second_start, second_end)
 
-    assert count2 == 2, (
-        "A checkpoint that only partially overlaps (but does not fully "
-        "cover) a newly requested range must not cause the request to be "
-        "silently skipped as already-done -- since the checkpoint doesn't "
-        "genuinely cover this range, it must not be treated as a resume "
-        "cursor either, and both items in the new request must be "
-        "ingested fresh"
-    )
+    assert count2 == 2
     assert cp2.start_time == second_start
     assert cp2.end_time == second_end
