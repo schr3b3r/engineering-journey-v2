@@ -256,6 +256,118 @@ def test_multi_year_window_metrics_measurement(mock_fulcra_client) -> None:
             assert metrics["records_ingested"] == 3
 
 
+def test_get_uncovered_ranges_calculation(mock_fulcra_client) -> None:
+    """Verify CheckpointManager.get_uncovered_ranges accurately subtracts completed ranges."""
+    cp_mgr = CheckpointManager(mock_fulcra_client)
+    repo = "org/calc-repo"
+    identity = "calc_dev"
+
+    # Initially full range is uncovered
+    uncovered = cp_mgr.get_uncovered_ranges(repo, identity, "2023-01-01T00:00:00Z", "2025-12-31T23:59:59Z")
+    assert len(uncovered) == 1
+    assert uncovered[0] == ("2023-01-01T00:00:00Z", "2025-12-31T23:59:59Z")
+
+    # Save completed checkpoint for 2024
+    cp2024 = Checkpoint(
+        repo=repo,
+        github_identity=identity,
+        start_time="2024-01-01T00:00:00Z",
+        end_time="2024-12-31T23:59:59Z",
+        status="completed",
+    )
+    cp_mgr.save_checkpoint(cp2024)
+
+    # Now 2024 is covered, backward (2023) and forward (2025) are uncovered
+    uncovered2 = cp_mgr.get_uncovered_ranges(repo, identity, "2023-01-01T00:00:00Z", "2025-12-31T23:59:59Z")
+    assert len(uncovered2) == 2
+    assert uncovered2[0][0].startswith("2023-01-01")
+    assert uncovered2[0][1].startswith("2024-01-01")
+    assert uncovered2[1][0].startswith("2024-12-31")
+    assert uncovered2[1][1].startswith("2025-12-31")
+
+
+def test_backward_extension_no_duplication(mock_fulcra_client) -> None:
+    """Verify extending backfill backward into the past fetches past items without re-fetching/duplicating present items."""
+    identity = "ext_dev_back"
+    repo = "ext/repo-back"
+
+    item_2024 = GitHubActivityItem("commit", repo, identity, "c_2024", "2024-06-15T10:00:00Z", "2024 Commit", "")
+    item_2023 = GitHubActivityItem("commit", repo, identity, "c_2023", "2023-06-15T10:00:00Z", "2023 Commit", "")
+
+    mock_gh = MockGitHubAPISpike({repo: [item_2023, item_2024]})
+    engine = BackfillEngine(mock_fulcra_client, mock_gh)
+
+    # Initial run: Backfill 2024 only
+    metrics_2024 = engine.run_backfill(identity, "2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z", repos=[repo])
+    assert metrics_2024["records_ingested"] == 1
+
+    # Backward extension run: Backfill 2023 through 2024
+    metrics_ext = engine.run_backfill(identity, "2023-01-01T00:00:00Z", "2024-12-31T23:59:59Z", repos=[repo])
+    assert metrics_ext["records_ingested"] == 1  # Only 2023 item ingested!
+
+    # Check queried activity in Fulcra for full range: should have 2 items with no duplicates
+    ingestor = RawActivityIngestor(mock_fulcra_client)
+    all_items = ingestor.get_raw_activities(repo=repo, github_identity=identity, start_time="2023-01-01T00:00:00Z", end_time="2024-12-31T23:59:59Z")
+    assert len(all_items) == 2
+    assert [i.item_id for i in all_items] == ["c_2023", "c_2024"]
+
+
+def test_forward_extension_no_duplication(mock_fulcra_client) -> None:
+    """Verify extending backfill forward into the future fetches future items without re-fetching/duplicating past items."""
+    identity = "ext_dev_fwd"
+    repo = "ext/repo-fwd"
+
+    item_2024 = GitHubActivityItem("commit", repo, identity, "c_2024", "2024-06-15T10:00:00Z", "2024 Commit", "")
+    item_2025 = GitHubActivityItem("commit", repo, identity, "c_2025", "2025-06-15T10:00:00Z", "2025 Commit", "")
+
+    mock_gh = MockGitHubAPISpike({repo: [item_2024, item_2025]})
+    engine = BackfillEngine(mock_fulcra_client, mock_gh)
+
+    # Initial run: Backfill 2024 only
+    metrics_2024 = engine.run_backfill(identity, "2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z", repos=[repo])
+    assert metrics_2024["records_ingested"] == 1
+
+    # Forward extension run: Backfill 2024 through 2025
+    metrics_ext = engine.run_backfill(identity, "2024-01-01T00:00:00Z", "2025-12-31T23:59:59Z", repos=[repo])
+    assert metrics_ext["records_ingested"] == 1  # Only 2025 item ingested!
+
+    # Check queried activity in Fulcra for full range
+    ingestor = RawActivityIngestor(mock_fulcra_client)
+    all_items = ingestor.get_raw_activities(repo=repo, github_identity=identity, start_time="2024-01-01T00:00:00Z", end_time="2025-12-31T23:59:59Z")
+    assert len(all_items) == 2
+    assert [i.item_id for i in all_items] == ["c_2024", "c_2025"]
+
+
+def test_dual_extension_and_re_run_noop(mock_fulcra_client) -> None:
+    """Verify dual backward/forward extension in a single call, followed by re-run noop."""
+    identity = "ext_dev_dual"
+    repo = "ext/repo-dual"
+
+    items = [
+        GitHubActivityItem("commit", repo, identity, "c_2023", "2023-06-15T10:00:00Z", "2023 Commit", ""),
+        GitHubActivityItem("commit", repo, identity, "c_2024", "2024-06-15T10:00:00Z", "2024 Commit", ""),
+        GitHubActivityItem("commit", repo, identity, "c_2025", "2025-06-15T10:00:00Z", "2025 Commit", ""),
+    ]
+
+    mock_gh = MockGitHubAPISpike({repo: items})
+    engine = BackfillEngine(mock_fulcra_client, mock_gh)
+
+    # Initial run: 2024
+    m1 = engine.run_backfill(identity, "2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z", repos=[repo])
+    assert m1["records_ingested"] == 1
+
+    # Dual extension: 2023..2025
+    m2 = engine.run_backfill(identity, "2023-01-01T00:00:00Z", "2025-12-31T23:59:59Z", repos=[repo])
+    assert m2["records_ingested"] == 2  # 2023 and 2025 items ingested!
+
+    # Re-run full range: 2023..2025 (should be complete no-op)
+    calls_before = mock_gh.api_call_count
+    m3 = engine.run_backfill(identity, "2023-01-01T00:00:00Z", "2025-12-31T23:59:59Z", repos=[repo])
+    assert m3["records_ingested"] == 0
+    assert repo in m3["repos_covered"]
+    assert mock_gh.api_call_count == calls_before  # No API calls made!
+
+
 def test_real_fulcra_multi_repo_integration() -> None:
     """Integration test against real Fulcra API (if authenticated)."""
     try:
