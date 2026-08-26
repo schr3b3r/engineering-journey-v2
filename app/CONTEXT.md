@@ -32,7 +32,7 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
-Freshly scaffolded — no code written yet. See `plan.md` (at the repo root) for the intended build sequence.
+Milestone M1 completed — "GitHub Backfill Checkpoint" custom annotation type implemented in `checkpoint.py` with tag formatting (truncating tags to <= 30 chars per Fulcra API limit) and full test suite passing in `tests/test_checkpoint.py`.
 
 See `features/INDEX.md` for the full, structured feature spec — what the
 app is supposed to do, broken into individually-scoped features with
@@ -45,6 +45,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(M1)** Tag length constraint: Fulcra API strictly limits tag names to 30 characters maximum (`String should have at most 30 characters`). `format_tag` helper truncates raw tags longer than 30 characters and appends a 6-character SHA256 hash snippet to guarantee uniqueness and deterministic matching when filtering.
 - **(initial)** Scaffolded from the fulcra-rapid-prototype skill.
   Architecture, Interview, and Plan artifacts from the
   fulcra-prototype-grill-me skill's Intake/Interview/Architecture/Plan phases

@@ -7,7 +7,7 @@ status changes.
 
 | Feature | Status | Description |
 |---|---|---|
-| _(none yet — add a row per feature as you define them; see `_TEMPLATE.md` in this directory)_ | not_started | |
+| [m1_backfill_checkpoint.md](m1_backfill_checkpoint.md) | done | Resumable backfill progress marker using "GitHub Backfill Checkpoint" custom annotation and tag-based per-repo tracking |
 
 ## Status values
 - `not_started` — described but no work done yet.
