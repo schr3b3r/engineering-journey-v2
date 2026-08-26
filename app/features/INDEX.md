@@ -8,6 +8,7 @@ status changes.
 | Feature | Status | Description |
 |---|---|---|
 | [m1_backfill_checkpoint.md](m1_backfill_checkpoint.md) | done | Resumable backfill progress marker using "GitHub Backfill Checkpoint" custom annotation and tag-based per-repo tracking |
+| [m2_github_api_spike.md](m2_github_api_spike.md) | done | GitHub API spike for existence pre-check, per-item retrieval shapes, and Fulcra agg/day endpoint verification |
 
 ## Status values
 - `not_started` — described but no work done yet.
