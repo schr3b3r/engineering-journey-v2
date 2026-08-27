@@ -45,9 +45,20 @@ Ingest a user-provided span of a developer's GitHub activity (from their own aut
    # Precompute Rollups & Notability Signals
    python cli.py rollup --years 1.0
 
+   # Preview cross-repo period summarization prompts (no model call)
+   python cli.py summarize --years 1.0 --output summarization_handoff.json
+
    # Generate Narrative Document
    python cli.py narrative --range full --output my_story.md
    ```
+
+4. For a real, engaging narrative (not templated per-repo one-liners), generate and persist real cross-repo period summaries first, from the **repo root**:
+   ```bash
+   pip install -e .   # harness deps: anthropic, google-genai, openai
+   python scripts/summarize_periods.py --identity <username> --years 1.0
+   cd app && python cli.py narrative --range full --output my_story.md
+   ```
+   This is what `pipeline` runs automatically by default (pass `--skip-real-summarization` to opt out).
 
 ---
 

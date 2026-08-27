@@ -27,7 +27,7 @@ the system prompt or a tool instead.
 
 from dataclasses import dataclass, field
 
-from harness.providers.gemini import call_model
+from harness.providers import call_model
 from harness.prompts import load_app_context, load_system_prompt
 from harness.tools import ALL_TOOLS
 
@@ -150,7 +150,14 @@ def run(
             if verbose:
                 print(f"[loop] tool result: {result!r}")
 
-            messages.append({"role": "tool", "name": name, "content": str(result)})
+            messages.append(
+                {
+                    "role": "tool",
+                    "name": name,
+                    "content": str(result),
+                    "tool_call_id": call.get("id"),
+                }
+            )
 
     if verbose:
         print(f"[loop] stopped: hit max_iterations ({max_iterations})")

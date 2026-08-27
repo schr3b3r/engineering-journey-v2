@@ -32,6 +32,28 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Cross-repo period summarization implemented (post-M10, in response to
+real user feedback -- GitHub issue #2 comparing v1's genuinely engaging
+narrative output against v2's flat, templated one). `summarize` was a
+no-op preview forever: nothing ever consumed its printed prompts, so
+every rollup's `summary_text` stayed `None` and `narrative` silently
+fell back to one mechanical sentence per single-repo rollup. Closed
+that loop for real: `summarization.py` now groups rollups by period
+window ACROSS repositories (`group_rollups_by_period`) and produces one
+consolidated prompt per period spanning every active repo
+(`build_period_summarization_prompt`), and a new harness-side driver
+(`scripts/summarize_periods.py`, using `harness/providers/`'s
+multi-provider adapters -- Anthropic OAuth-preferred, Gemini, OpenAI)
+actually calls a real model and writes the result back via
+`summarize_periods_and_write_back`. `narrative.py`'s paced section
+renders the real, consolidated cross-repo paragraph when one exists for
+a period, and falls back honestly to per-repo rendering when it
+doesn't (never silently claims a synthesis that didn't happen). `cli.py
+pipeline` now shells out to the driver script by default (opt out with
+`--skip-real-summarization`). Full pytest suite: 68 passed (was 61),
++7 new tests covering the cross-repo grouping/prompt/write-back
+mechanism and narrative's dedup rendering.
+
 Milestone M10 completed — Packaging as an installable, agent-agnostic skill (`SKILL.md`, `README.md`, `github_auth.py`, `cli.py`, `main.py`). Delivered a root-level `SKILL.md` skill definition and a directly runnable CLI (`cd app && python cli.py ...` / `cd app && python main.py ...` -- NOT `python -m app.cli`, since this project's modules use flat sibling-style imports throughout, matching every other module) supporting `auth`, `backfill`, `rollup`, `summarize`, `narrative`, and `pipeline` subcommands with zero hard agent dependencies. Implemented GitHub OAuth device-code flow (RFC 8628) with explicit user confirmation for detected `gh` sessions or `GITHUB_TOKEN` per spec requirement 8. Full pytest test suite passing (63 tests across `tests/test_cli.py`, `tests/test_narrative.py`, `tests/test_notability.py`, `tests/test_summarization.py`, `tests/test_rollups.py`, `tests/test_backfill.py`, `tests/test_raw_ingestion.py`, `tests/test_github_spike.py`, `tests/test_checkpoint.py`).
 
 See `features/INDEX.md` for the full, structured feature spec — what the
@@ -45,6 +67,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(post-M10)** Cross-Repo Period Summarization (`summarization.py`'s `group_rollups_by_period`/`build_period_summarization_prompt`/`summarize_periods_and_write_back`, new `scripts/summarize_periods.py`, ported `harness/providers/` multi-provider adapters): fixed a real quality gap where `narrative` output was a flat, templated data dump instead of connected prose, because `summarize` never actually called a model or wrote anything back. The fix keeps `app/`'s zero-LLM-SDK constraint intact by putting the real model call in harness-side tooling (`scripts/summarize_periods.py`, which imports both `app/`'s data layer and `harness/providers/`), not in `app/cli.py`. Grouping is cross-repo per period window (matching how a genuinely good narrative reads -- one paragraph per quarter spanning every active repo, not one per single-repo rollup). `narrative.py` deduplicates by (period bounds, shared summary_text) to render the consolidated paragraph, falling back honestly per-repo when no real summary was written back for a period.
 - **(M10)** Skill Packaging & Standalone CLI (`cli.py`, `main.py`, `github_auth.py`, `SKILL.md`): Standalone CLI with zero hard agent dependencies supporting `auth`, `backfill`, `rollup`, `summarize`, `narrative`, and end-to-end `pipeline`. GitHub auth defaults to browser OAuth device-code flow (RFC 8628) and explicitly prompts user for confirmation when existing `gh` session or `GITHUB_TOKEN` is detected. Shipped root-level `SKILL.md` and `README.md` for fresh agent or developer usage.
 - **(M9)** Narrative Generation & Provenance Appendix (`narrative.py` & `NarrativeGenerator`): Paced markdown story generation supporting user-interactive range selection ("full", single year, year range, date window), task-prompt shaping for running agent prose generation with deterministic fallback prose, and explicit Provenance Appendix output. `parse_narrative_document()` and `verify_narrative_provenance()` parse code spans in the appendix and verify that every referenced Rollup, Notability Signal, and raw source ID (`raw:repo:item_id`) traces back to real underlying records.
 - **(M8)** "Notability Signal" Layer (`notability.py` & `NotabilityEngine`): Uses `NumericAnnotation` custom type ("Notability Signal") with period start ISO timestamp as `recorded_at`, score in `value` field, and rich statistical baseline comparison in `note` JSON payload (mean, std dev, z-score, volume ratio, activity breakdown, category triggers, and narrative explanation). Filterable tags include `notability_signal`, `period_type`, `github_identity`, `repo`, and `notability_category:<cat>`. Uses `numeric_annotations(start_time, end_time, source=type_source_id)` for high-performance querying and deduplication.

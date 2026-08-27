@@ -20,10 +20,16 @@ this repo, so the CLI must be invoked as `python cli.py ...` /
 the repo root.
 
 ### Python Dependencies
-Ensure Python 3.10+ and the required packages are installed:
+Ensure Python 3.10+ and the required packages are installed. This repo
+has two separate dependency sets, matching the app/harness boundary
+described in section 2 (Rollup Summarization) below:
 ```bash
-pip install -r requirements.txt
-# or: pip install fulcra-api requests pytest
+# app/'s own deps (zero LLM SDKs -- see app/features/m7_rollup_summarization.md)
+pip install -r app/requirements.txt
+
+# harness deps (needed only for scripts/summarize_periods.py's real
+# model calls -- includes anthropic/google-genai/openai)
+pip install -e .
 ```
 
 ### Fulcra Credentials
@@ -77,7 +83,7 @@ request will not resolve it from that kind of environment.
 The application provides a standalone CLI with zero hard agent dependencies. Run every command below from inside `app/` (`cd app` first).
 
 ### Quick Start: Run Full Pipeline
-To run the complete sequence (Backfill -> Activity Rollups -> Notability Signals -> Task Prompt Summarization -> Narrative Generation):
+To run the complete sequence (Backfill -> Activity Rollups -> Notability Signals -> real cross-repo Summarization -> Narrative Generation):
 ```bash
 cd app
 python cli.py pipeline --years 1.0 --yes
@@ -102,58 +108,103 @@ Aggregates activity counts into day/week/month/quarter/year "Activity Rollup" (`
 python cli.py rollup --years 1.0 --identity <username>
 ```
 
-#### 4. Rollup Summarization Prompting
-Generates structured task prompts for model-driven period summarization write-backs:
+#### 4. Rollup Summarization
+This is a two-step process, deliberately split because `app/` code has
+zero LLM provider SDK dependencies (see
+`app/features/m7_rollup_summarization.md`) -- the real model call
+happens in harness-side tooling, not application code.
+
+**4a. Preview the prompts** (no model call, no write-back; writes the
+full cross-repo period prompt set to a JSON file for inspection):
 ```bash
-python cli.py summarize --years 1.0 --identity <username>
+python cli.py summarize --years 1.0 --identity <username> --output summarization_handoff.json
 ```
 
+**4b. Generate and persist real summaries** (calls a real model via
+`harness/providers/` -- Anthropic OAuth-preferred, or Gemini/OpenAI --
+and writes the results back to each period's rollups in Fulcra). Run
+this from the **repo root**, not `app/`:
+```bash
+python scripts/summarize_periods.py --identity <username> --years 1.0
+```
+This groups rollups by period window ACROSS repositories (e.g. all of a
+developer's activity in Q2 2024, spanning every repo active that
+quarter) and asks the model for ONE connected narrative paragraph per
+period -- this is what makes the eventual narrative document read as a
+real story instead of one templated sentence per single-repo rollup.
+Pass `--provider anthropic|gemini|openai` to force a specific provider,
+or `--dry-run` to see how many period groups would be summarized
+without calling a model.
+
 #### 5. Markdown Narrative Generation
-Generates a paced narrative story document with a Provenance Appendix for a specified range ("full", "1y", "2024", etc.):
+Generates a paced narrative story document with a Provenance Appendix for a specified range ("full", "1y", "2024", etc.). If step 4b was run first, periods with a real written-back summary render as one consolidated cross-repo paragraph; any period without one still renders honestly (per-repo, using the deterministic fallback), rather than silently claiming a synthesis that didn't happen:
 ```bash
 python cli.py narrative --range full --identity <username> --output my_story.md
 ```
+
+**Recommended:** just run the full pipeline, which invokes step 4b automatically:
+```bash
+python cli.py pipeline --years 1.0 --yes
+```
+Pass `--skip-real-summarization` to skip the real model call (falls back to templated per-repo summaries) if no provider credentials are configured, or `--provider anthropic|gemini|openai` to force one.
 
 ---
 
 ## 3. Programmatic Python API
 
-Every component is available as a clean Python library interface:
+Every component is available as a clean Python library interface (`app/`'s own modules never import an LLM SDK; the model call for summarization lives in `scripts/summarize_periods.py`, which imports both `app/`'s data layer and `harness/providers/`):
 
 ```python
 from fulcra_client import get_fulcra_client
 from github_auth import get_github_auth_token
 from backfill import BackfillEngine
+from github_spike import GitHubAPISpike
+from raw_ingestion import RawActivityIngestor
 from rollups import RollupEngine
 from notability import NotabilityEngine
-from narrative import NarrativeGenerator, format_narrative_document
+from summarization import RollupSummarizer
+from narrative import NarrativeGenerator
 
 # 1. Authenticate
 client = get_fulcra_client()
 token = get_github_auth_token(auto_accept_existing=True)
 
 # 2. Backfill
-backfill_engine = BackfillEngine(client=client, github_token=token)
-summary = backfill_engine.run_backfill_for_user(
+spike = GitHubAPISpike(token=token)
+backfill_engine = BackfillEngine(fulcra_client=client, github_api=spike)
+summary = backfill_engine.run_backfill(
     github_identity="gklei",
-    since="2024-01-01T00:00:00Z",
-    until="2025-01-01T00:00:00Z",
+    start_time="2024-01-01T00:00:00Z",
+    end_time="2025-01-01T00:00:00Z",
 )
 
 # 3. Rollups & Notability
+raw_ingestor = RawActivityIngestor(client=client)
+raw_items = raw_ingestor.get_raw_activities(github_identity="gklei")
 rollup_engine = RollupEngine(client=client)
-rollup_engine.compute_and_store_rollups("gklei", "2024-01-01T00:00:00Z", "2025-01-01T00:00:00Z")
+rollups_by_period = rollup_engine.generate_all_rollups(raw_items, "gklei", save_to_fulcra=True)
+all_rollups = [r for period_rollups in rollups_by_period.values() for r in period_rollups]
 
 notability_engine = NotabilityEngine(client=client)
-notability_engine.compute_and_store_notability_signals("gklei", "2024-01-01T00:00:00Z", "2025-01-01T00:00:00Z")
+signals = notability_engine.compute_signals(all_rollups)
+notability_engine.save_signals(signals)
 
-# 4. Narrative
+# 4. Cross-repo period summarization (real model call -- see
+#    scripts/summarize_periods.py for the harness.providers wiring;
+#    app/ itself only defines the callback shape, never an SDK import)
+summarizer = RollupSummarizer(client=client)
+summarizer.summarize_periods_and_write_back(
+    all_rollups,
+    summary_provider_fn=my_real_model_call_fn,  # Callable[[str], str]
+)
+
+# 5. Narrative
 generator = NarrativeGenerator(client=client)
-narrative_doc = generator.generate_narrative("gklei", range_selection="1y")
-md_content = format_narrative_document(narrative_doc)
-
-with open(narrative_doc.filename, "w") as f:
-    f.write(md_content)
+doc_content, filename, used_rollups, used_signals = generator.generate_narrative(
+    "gklei", range_selection="1y",
+)
+with open(filename, "w") as f:
+    f.write(doc_content)
 ```
 
 ---

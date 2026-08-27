@@ -73,13 +73,36 @@ class ModelResponse:
 
 
 def _get_client() -> genai.Client:
+    """Two ways to authenticate, checked in this order:
+
+    1. Vertex AI / Application Default Credentials (preferred, no API key
+       needed). If the user has already run
+       `gcloud auth application-default login` (or is running somewhere
+       with ambient ADC, e.g. a GCE/Cloud Shell environment), passing
+       `vertexai=True` with a project/location makes the client use those
+       credentials automatically -- verified against `google.auth.default`,
+       which genai.Client delegates to internally when `vertexai=True` and
+       no explicit `credentials=`/`api_key=` is given. Set
+       `GOOGLE_CLOUD_PROJECT` (and optionally `GOOGLE_CLOUD_LOCATION`) to
+       use this path.
+    2. `GEMINI_API_KEY` (fallback, if no ADC project is configured).
+    """
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if project:
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        return genai.Client(vertexai=True, project=project, location=location)
+
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not set. Load it from .env before calling "
-            "the harness (see harness/providers/gemini.py docstring)."
-        )
-    return genai.Client(api_key=api_key)
+    if api_key:
+        return genai.Client(api_key=api_key)
+
+    raise RuntimeError(
+        "No Gemini credentials found. Either run `gcloud auth "
+        "application-default login` once (no API key needed -- this is "
+        "the preferred path) and set GOOGLE_CLOUD_PROJECT in .env, or set "
+        "GEMINI_API_KEY as a fallback. See harness/providers/gemini.py "
+        "docstring."
+    )
 
 
 def _to_gemini_contents(messages: list[dict]) -> list[types.Content]:

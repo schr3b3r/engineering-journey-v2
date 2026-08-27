@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize_parser.add_argument("--since", type=str, help="Start ISO timestamp.")
     summarize_parser.add_argument("--until", type=str, help="End ISO timestamp.")
     summarize_parser.add_argument("--identity", type=str, help="GitHub username.")
+    summarize_parser.add_argument("--output", type=str, help="File path to write the full JSON prompt handoff (default: summarization_handoff.json).")
 
     # 5. NARRATIVE command
     narrative_parser = subparsers.add_parser("narrative", help="Generate paced markdown narrative document.")
@@ -80,6 +81,21 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--yes", "-y", action="store_true", help="Auto-accept GitHub auth session.")
     pipeline_parser.add_argument("--device-code", action="store_true", help="Force GitHub device-code auth flow.")
     pipeline_parser.add_argument("--dry-run", action="store_true", help="Perform discovery/pre-checks without writing raw records (backfill step only; skips rollup/summarize/narrative since there is no real data to act on).")
+    pipeline_parser.add_argument(
+        "--skip-real-summarization", action="store_true",
+        help=(
+            "Skip invoking scripts/summarize_periods.py (the harness-side "
+            "real model call) and go straight to narrative generation. "
+            "The resulting narrative will fall back to templated, "
+            "per-repo summaries instead of connected cross-repo prose "
+            "(see app/summarization.py's module docstring) -- use this "
+            "only if no provider credentials are configured."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--provider", type=str, choices=["anthropic", "gemini", "openai"],
+        help="Force a specific provider for real summarization (passed through to scripts/summarize_periods.py).",
+    )
 
     return parser
 
@@ -201,7 +217,20 @@ def handle_rollup(args: argparse.Namespace) -> int:
 
 
 def handle_summarize(args: argparse.Namespace) -> int:
-    """Execute rollup summarization task prompt building."""
+    """Execute rollup summarization task prompt building.
+
+    This command only PREVIEWS/exports the structured prompts -- it does
+    not call a model or write anything back (per
+    app/features/m7_rollup_summarization.md: app/ code must have zero
+    LLM provider SDK dependencies). To actually generate and persist
+    real cross-repo period summaries (what makes the eventual narrative
+    read as connected prose instead of one templated line per rollup),
+    run the harness-side driver script instead:
+
+        python scripts/summarize_periods.py --identity <username>
+
+    from the repo root (see README.md / SKILL.md).
+    """
     try:
         f_client = get_fulcra_client()
     except FulcraAuthError as err:
@@ -222,16 +251,25 @@ def handle_summarize(args: argparse.Namespace) -> int:
         start_time=since_iso,
         end_time=until_iso,
     )
-    print(f"\n--- Preparing Summarization Handoff ({len(rollups)} rollups) ---")
+    print(f"\n--- Preparing Cross-Repo Period Summarization Handoff ({len(rollups)} rollups) ---")
 
     summarizer = RollupSummarizer(client=f_client)
-    handoff_payloads = summarizer.prepare_handoff(rollups)
+    handoff_payloads = summarizer.prepare_period_handoff(rollups)
 
-    print("\n--- Harness Task Prompts for Rollup Summarization ---")
-    preview = json.dumps(handoff_payloads[:1], indent=2) if handoff_payloads else "[]"
-    print(preview[:1500])
-    if len(preview) > 1500:
-        print(f"\n... [{len(preview) - 1500} characters truncated; {len(handoff_payloads)} total payload(s)]")
+    out_path = args.output or "summarization_handoff.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(handoff_payloads, f, indent=2)
+
+    print(f"\nWrote {len(handoff_payloads)} cross-repo period prompt(s) to: {out_path}")
+    print(
+        "\nThis command only previews prompts -- it does not call a model "
+        "or write summaries back. To actually generate and persist real "
+        "prose (recommended; produces a genuinely engaging narrative "
+        "instead of a templated one), run:\n"
+        "  python scripts/summarize_periods.py --identity "
+        f"{identity}\n"
+        "from the repo root. See that script's --help / SKILL.md for details."
+    )
 
     return 0
 
@@ -290,8 +328,46 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     if ret != 0:
         return ret
 
-    # Step 3: Summarization
-    handle_summarize(args)
+    # Step 3: Real cross-repo period summarization. This is the step
+    # that actually produces engaging, connected narrative prose instead
+    # of a templated one-liner per rollup (see
+    # app/summarization.py's module docstring / GitHub issue #2). It
+    # requires calling a real model, which app/ code is not allowed to
+    # do directly (app/features/m7_rollup_summarization.md: no LLM SDK
+    # dependency in app code) -- so this shells out to the harness-side
+    # driver script as a separate process, keeping that boundary intact.
+    if not getattr(args, "skip_real_summarization", False):
+        print("\n--- Generating real cross-repo period summaries (scripts/summarize_periods.py) ---")
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(repo_root, "scripts", "summarize_periods.py")
+        cmd = [sys.executable, script_path, "--years", str(args.years)]
+        if args.identity:
+            cmd += ["--identity", args.identity]
+        if getattr(args, "since", None):
+            cmd += ["--since", args.since]
+        if getattr(args, "until", None):
+            cmd += ["--until", args.until]
+        if getattr(args, "provider", None):
+            cmd += ["--provider", args.provider]
+
+        import subprocess
+
+        result = subprocess.run(cmd, cwd=repo_root)
+        if result.returncode != 0:
+            print(
+                "\nWarning: real summarization step failed or found no "
+                "provider credentials configured (see output above). "
+                "Continuing to narrative generation -- it will fall back "
+                "to templated per-repo summaries for any period that "
+                "didn't get a real one written back.",
+                file=sys.stderr,
+            )
+    else:
+        print(
+            "\n--skip-real-summarization set: skipping real cross-repo "
+            "summarization. The narrative will use templated per-repo "
+            "summaries instead of connected prose."
+        )
 
     # Step 4: Narrative Generation
     ret = handle_narrative(args)

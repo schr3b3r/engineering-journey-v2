@@ -6,6 +6,42 @@ the summarization step against real M6 rollups:
 - Structured-input handoff packaging (`format_rollup_summary_handoff`)
 - Deterministic write-back into the rollup's `note` field via `RollupSummarizer`
 - Zero bundled LLM provider dependencies or API key requirements.
+
+Per-rollup summarization (`build_summarization_prompt`,
+`format_rollup_summary_handoff`, `write_back_summary`) is the original,
+finer-grained mechanism: one prompt/summary per single-repo period
+rollup. It is kept for backward compatibility (existing tests, direct
+API users) but produces a flat, mechanical narrative when used alone --
+see the module-level "cross-repo period summarization" section below,
+added in response to a real quality gap (GitHub issue #2 against
+schr3b3r/engineering-journey-v2): a v1 prototype of this same project
+produced genuinely engaging quarter-by-quarter prose that synthesized
+work ACROSS repositories in one narrative arc, while v2's CLI-only
+pipeline never actually completed the "agent writes real prose, then
+writes it back" loop -- `summarize` only printed a prompt PREVIEW to
+stdout and nothing ever consumed it, so `summary_text` stayed `None` on
+every rollup forever and narrative.py silently fell back to one
+templated one-liner per single-repo rollup.
+
+Cross-repo period summarization closes that loop for real:
+1. `group_rollups_by_period` buckets same-period-window rollups across
+   ALL repos together (matching how v1's actual narrative was
+   structured -- one prose paragraph per quarter, spanning every repo
+   active that quarter), instead of the original per-single-repo-rollup
+   granularity.
+2. `build_period_summarization_prompt` produces ONE prompt per period
+   bucket, describing every repo's activity breakdown for that window,
+   so a human/agent authoring the summary can synthesize a real
+   cross-repo narrative the way v1's did.
+3. `RollupSummarizer.prepare_period_handoff` / `write_back_period_summary`
+   package/persist these consolidated prompts and summaries. Write-back
+   still uses the exact same durable mechanism as the per-rollup path
+   (`summary_text` on each underlying `ActivityRollup`, persisted via
+   `RollupEngine.save_rollups`) -- every rollup belonging to one period
+   bucket receives the SAME consolidated summary_text, so no new Fulcra
+   data type or schema migration is needed; narrative.py's rendering
+   just needs to deduplicate by (period bounds, summary_text) when
+   presenting the "Paced Activity Narrative" section (see narrative.py).
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -203,3 +239,177 @@ class RollupSummarizer:
             tuples.append((r, summary_text))
 
         return self.batch_write_back_summaries(tuples, save_to_fulcra=save_to_fulcra)
+
+    # ------------------------------------------------------------------
+    # Cross-repo period summarization (see module docstring).
+    # ------------------------------------------------------------------
+
+    def prepare_period_handoff(
+        self, rollups: List[ActivityRollup]
+    ) -> List[Dict[str, Any]]:
+        """Group `rollups` by period window and produce ONE consolidated
+        handoff payload per group, spanning every repo active in that
+        window -- the structure a human/agent needs to write a real
+        cross-repo narrative paragraph, matching how v1's actual prose
+        was organized (one paragraph per quarter, not one templated
+        sentence per single-repo rollup).
+        """
+        groups = group_rollups_by_period(rollups)
+        return [
+            format_period_summary_handoff(group_key, group_rollups)
+            for group_key, group_rollups in groups
+        ]
+
+    def write_back_period_summary(
+        self,
+        rollups: List[ActivityRollup],
+        summary_text: str,
+        save_to_fulcra: bool = True,
+    ) -> List[ActivityRollup]:
+        """Write the SAME consolidated summary_text onto every rollup in
+        one period group (all repos active in that period window).
+        narrative.py deduplicates by (period bounds, summary_text) when
+        rendering, so this does not produce N duplicate paragraphs for
+        N repos -- it produces one real paragraph per period, correctly
+        attributed to every rollup record it was synthesized from (so
+        provenance stays traceable to each of them).
+        """
+        for r in rollups:
+            r.summary_text = summary_text
+        if save_to_fulcra and rollups:
+            self.engine.save_rollups(rollups)
+        return rollups
+
+    def summarize_periods_and_write_back(
+        self,
+        rollups: List[ActivityRollup],
+        summary_provider_fn: Callable[[str], str],
+        save_to_fulcra: bool = True,
+    ) -> List[ActivityRollup]:
+        """High-level cross-repo period summarization workflow.
+
+        Unlike `summarize_and_write_back`, `summary_provider_fn` here
+        takes the already-built consolidated PROMPT STRING (not a
+        rollup) and returns real prose for it -- this is the shape an
+        actual LLM/agent call takes (one text-in, text-out call per
+        prompt), not a fallback template. There is deliberately no
+        default `summary_provider_fn` for this path: producing a real
+        cross-repo narrative requires an actual model call, and silently
+        falling back to a template here is exactly the failure mode this
+        method exists to close (see module docstring / GitHub issue #2).
+
+        Args:
+            rollups: All rollups to summarize, across all repos/periods.
+            summary_provider_fn: Callable(prompt_str) -> summary prose.
+                Must be supplied by the caller (e.g. cli.py wiring in a
+                real model call) -- there is no silent fallback.
+            save_to_fulcra: If True, persists updated rollups to Fulcra.
+
+        Returns:
+            All updated ActivityRollup records with summary_text set.
+        """
+        groups = group_rollups_by_period(rollups)
+        all_updated: List[ActivityRollup] = []
+        for group_key, group_rollups in groups:
+            prompt = build_period_summarization_prompt(group_key, group_rollups)
+            summary_text = summary_provider_fn(prompt)
+            all_updated.extend(
+                self.write_back_period_summary(
+                    group_rollups, summary_text, save_to_fulcra=save_to_fulcra
+                )
+            )
+        return all_updated
+
+
+def group_rollups_by_period(
+    rollups: List[ActivityRollup],
+) -> List[Tuple[Tuple[str, str, str], List[ActivityRollup]]]:
+    """Group rollups by (period_type, start_time, end_time), spanning ALL
+    repos in that window, sorted chronologically.
+
+    This is the cross-repo grouping v1's actual narrative structure
+    used -- e.g. all of a developer's `stok`, `portal`, and
+    `user-service` activity in Q2 2024 summarized together in one
+    paragraph, rather than three separate single-repo paragraphs for
+    the same quarter.
+
+    Returns a list of ((period_type, start_time, end_time), rollups)
+    tuples, sorted by start_time then period_type, so callers can
+    process/render periods in chronological order without re-sorting.
+    """
+    groups: Dict[Tuple[str, str, str], List[ActivityRollup]] = {}
+    for r in rollups:
+        key = (r.period_type, r.start_time, r.end_time)
+        groups.setdefault(key, []).append(r)
+
+    ordered_keys = sorted(groups.keys(), key=lambda k: (k[1], k[0]))
+    return [(key, groups[key]) for key in ordered_keys]
+
+
+def build_period_summarization_prompt(
+    period_key: Tuple[str, str, str],
+    period_rollups: List[ActivityRollup],
+) -> str:
+    """Build ONE consolidated prompt for a period group spanning
+    multiple repos, describing each repo's activity breakdown
+    separately so the author of the summary can synthesize a real,
+    connected cross-repo narrative -- the structure that produced v1's
+    quality, instead of one prompt per single-repo rollup.
+    """
+    period_type, start_time, end_time = period_key
+    identity = period_rollups[0].github_identity if period_rollups else "unknown"
+
+    repo_lines = []
+    for r in sorted(period_rollups, key=lambda x: x.repo or ""):
+        repo_str = r.repo or "(unscoped)"
+        if r.counts:
+            breakdown = ", ".join(
+                f"{count} {act_type}" for act_type, count in sorted(r.counts.items())
+            )
+        else:
+            breakdown = "no activity recorded"
+        repo_lines.append(
+            f"  - {repo_str}: {r.total_activity_count} activities ({breakdown})"
+        )
+
+    repos_str = "\n".join(repo_lines) if repo_lines else "  - No repositories active this period"
+    total_activities = sum(r.total_activity_count for r in period_rollups)
+
+    prompt = (
+        f"Write an engaging, connected narrative paragraph (not a bare list) "
+        f"describing '{identity}'s engineering work during the {period_type} "
+        f"period {start_time[:10]} to {end_time[:10]}, synthesizing what was "
+        f"built and why ACROSS all repositories active in this period -- not "
+        f"one disconnected sentence per repo:\n"
+        f"- Total Activity Across All Repos: {total_activities}\n"
+        f"- Per-Repository Breakdown:\n{repos_str}\n\n"
+        f"Instructions: Write 1-3 sentences of real prose (not a template, "
+        f"not a bullet list) that reads like a technical narrative -- "
+        f"describe the THEMES of the work (what capability/feature/system "
+        f"was being built or improved) and how work across repositories in "
+        f"this period connects, the way a technical retrospective would. "
+        f"Use the activity counts and repo names as evidence, but the goal "
+        f"is a cohesive story, not a recitation of numbers."
+    )
+    return prompt
+
+
+def format_period_summary_handoff(
+    period_key: Tuple[str, str, str],
+    period_rollups: List[ActivityRollup],
+) -> Dict[str, Any]:
+    """Package one period group into a structured handoff payload,
+    analogous to `format_rollup_summary_handoff` but spanning all repos
+    active in that period."""
+    period_type, start_time, end_time = period_key
+    identity = period_rollups[0].github_identity if period_rollups else "unknown"
+    return {
+        "period_type": period_type,
+        "start_time": start_time,
+        "end_time": end_time,
+        "github_identity": identity,
+        "rollup_ids": [r.get_source_id() for r in period_rollups],
+        "repos": sorted({r.repo for r in period_rollups if r.repo}),
+        "total_activity_count": sum(r.total_activity_count for r in period_rollups),
+        "prompt": build_period_summarization_prompt(period_key, period_rollups),
+    }
