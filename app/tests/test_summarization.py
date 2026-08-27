@@ -193,3 +193,142 @@ def test_batch_summarize_and_write_back(mock_fulcra_client) -> None:
 
     assert len(year_queried) == 1
     assert year_queried[0].summary_text == f"[Agent Summary for year] {identity} executed 2 activities."
+
+
+# Regression tests for cross-repo period summarization, added in response
+# to a real quality gap (GitHub issue #2 against
+# schr3b3r/engineering-journey-v2): per-rollup summarization alone
+# produces a flat narrative (one templated sentence per single-repo
+# rollup); grouping cross-repo by period window and summarizing each
+# group in ONE call is what actually lets a real narrative synthesize
+# work across repos the way v1's output did.
+
+
+def test_group_rollups_by_period_groups_across_repos(mock_fulcra_client) -> None:
+    from summarization import group_rollups_by_period
+
+    identity = "cross_repo_dev"
+    r1 = ActivityRollup(
+        period_type="quarter", start_time="2024-04-01T00:00:00Z", end_time="2024-06-30T23:59:59Z",
+        github_identity=identity, repo="acme/web", counts={"commit": 3}, total_activity_count=3,
+    )
+    r2 = ActivityRollup(
+        period_type="quarter", start_time="2024-04-01T00:00:00Z", end_time="2024-06-30T23:59:59Z",
+        github_identity=identity, repo="acme/api", counts={"pr_merge": 1}, total_activity_count=1,
+    )
+    r3 = ActivityRollup(
+        period_type="quarter", start_time="2024-07-01T00:00:00Z", end_time="2024-09-30T23:59:59Z",
+        github_identity=identity, repo="acme/web", counts={"commit": 1}, total_activity_count=1,
+    )
+
+    groups = group_rollups_by_period([r1, r2, r3])
+    assert len(groups) == 2
+
+    q2_key, q2_rollups = groups[0]
+    assert q2_key == ("quarter", "2024-04-01T00:00:00Z", "2024-06-30T23:59:59Z")
+    assert {r.repo for r in q2_rollups} == {"acme/web", "acme/api"}
+
+    q3_key, q3_rollups = groups[1]
+    assert q3_key == ("quarter", "2024-07-01T00:00:00Z", "2024-09-30T23:59:59Z")
+    assert {r.repo for r in q3_rollups} == {"acme/web"}
+
+
+def test_build_period_summarization_prompt_describes_all_repos() -> None:
+    from summarization import build_period_summarization_prompt
+
+    identity = "cross_repo_dev"
+    key = ("quarter", "2024-04-01T00:00:00Z", "2024-06-30T23:59:59Z")
+    rollups = [
+        ActivityRollup(
+            period_type="quarter", start_time=key[1], end_time=key[2],
+            github_identity=identity, repo="acme/web", counts={"commit": 3}, total_activity_count=3,
+        ),
+        ActivityRollup(
+            period_type="quarter", start_time=key[1], end_time=key[2],
+            github_identity=identity, repo="acme/api", counts={"pr_merge": 1}, total_activity_count=1,
+        ),
+    ]
+    prompt = build_period_summarization_prompt(key, rollups)
+    assert "acme/web" in prompt
+    assert "acme/api" in prompt
+    assert "ACROSS all repositories" in prompt
+    assert "not one disconnected sentence per repo" in prompt
+    # Must ask for real prose, not a template/list, since that's the
+    # exact failure mode this mechanism exists to fix.
+    assert "not a template" in prompt
+
+
+def test_summarize_periods_and_write_back_persists_one_summary_per_period(mock_fulcra_client) -> None:
+    """The core cross-repo mechanism end to end: real write-back via the
+    same durable ActivityRollup.summary_text + RollupEngine.save_rollups
+    path as the per-rollup mechanism, but ONE call per period group
+    spanning multiple repos, not one call per single-repo rollup."""
+    engine = RollupEngine(mock_fulcra_client)
+    identity = "period_writeback_dev"
+
+    items = [
+        GitHubActivityItem("commit", "acme/web", identity, "c1", "2024-04-05T10:00:00Z", "C1", ""),
+        GitHubActivityItem("pr_merge", "acme/api", identity, "p1", "2024-04-10T10:00:00Z", "P1", ""),
+    ]
+    rollups_by_period = engine.generate_all_rollups(items, identity, save_to_fulcra=True)
+    month_rollups = rollups_by_period["month"]
+    assert len(month_rollups) == 2  # one per repo, same month
+
+    summarizer = RollupSummarizer(mock_fulcra_client)
+
+    calls = []
+
+    def fake_model_call(prompt: str) -> str:
+        calls.append(prompt)
+        return "A real, connected cross-repo narrative paragraph, not a template."
+
+    updated = summarizer.summarize_periods_and_write_back(
+        month_rollups, summary_provider_fn=fake_model_call, save_to_fulcra=True,
+    )
+
+    # Exactly ONE model call for the whole period group (both repos),
+    # not one call per rollup -- this is the entire point of the fix.
+    assert len(calls) == 1
+    assert len(updated) == 2
+    assert all(r.summary_text == "A real, connected cross-repo narrative paragraph, not a template." for r in updated)
+
+    # Verify it was actually persisted (queried back from storage), not
+    # just mutated in memory.
+    fresh = engine.get_rollups(github_identity=identity, period_type="month")
+    assert len(fresh) == 2
+    assert all(r.summary_text == "A real, connected cross-repo narrative paragraph, not a template." for r in fresh)
+
+
+def test_summarize_periods_and_write_back_requires_a_real_provider_fn(mock_fulcra_client) -> None:
+    """There must be no silent fallback for the cross-repo path -- a
+    caller that forgets to wire in a real model call should get a loud
+    TypeError (missing required argument), not a quietly-templated
+    narrative (the exact bug this whole mechanism exists to fix)."""
+    engine = RollupEngine(mock_fulcra_client)
+    identity = "no_fallback_dev"
+    items = [GitHubActivityItem("commit", "acme/web", identity, "c1", "2024-04-05T10:00:00Z", "C1", "")]
+    rollups_by_period = engine.generate_all_rollups(items, identity, save_to_fulcra=True)
+
+    summarizer = RollupSummarizer(mock_fulcra_client)
+    with pytest.raises(TypeError):
+        summarizer.summarize_periods_and_write_back(rollups_by_period["month"])  # missing summary_provider_fn
+
+
+def test_prepare_period_handoff_matches_group_rollups_by_period(mock_fulcra_client) -> None:
+    engine = RollupEngine(mock_fulcra_client)
+    identity = "handoff_dev"
+    items = [
+        GitHubActivityItem("commit", "acme/web", identity, "c1", "2024-04-05T10:00:00Z", "C1", ""),
+        GitHubActivityItem("pr_merge", "acme/api", identity, "p1", "2024-04-10T10:00:00Z", "P1", ""),
+    ]
+    rollups_by_period = engine.generate_all_rollups(items, identity, save_to_fulcra=True)
+    month_rollups = rollups_by_period["month"]
+
+    summarizer = RollupSummarizer(mock_fulcra_client)
+    handoff = summarizer.prepare_period_handoff(month_rollups)
+
+    assert len(handoff) == 1  # one period group (both repos same month)
+    payload = handoff[0]
+    assert set(payload["repos"]) == {"acme/web", "acme/api"}
+    assert payload["total_activity_count"] == 2
+    assert "prompt" in payload and "acme/web" in payload["prompt"] and "acme/api" in payload["prompt"]

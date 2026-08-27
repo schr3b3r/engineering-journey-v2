@@ -16,5 +16,10 @@ harness/state/runs/
 app/.pytest_cache/
 app/**/__pycache__/
 
+# CLI runtime output (summarize/narrative command defaults)
+app/summarization_handoff.json
+app/engineering_journey_*.md
+summarization_handoff.json
+
 # OS
 .DS_Store

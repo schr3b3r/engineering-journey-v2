@@ -5,6 +5,14 @@ description = "A small, hand-rolled agent harness for building/running/extending
 requires-python = ">=3.11"
 dependencies = [
     "google-genai>=0.3.0",
+    # anthropic/openai: added to support the harness's multi-provider
+    # adapters (harness/providers/) used by
+    # scripts/summarize_periods.py to generate real cross-repo period
+    # narratives -- this is harness tooling, NOT app/ code (app/'s own
+    # requirements.txt deliberately has zero LLM SDK dependencies, per
+    # app/features/m7_rollup_summarization.md's explicit constraint).
+    "anthropic>=1.0.0",
+    "openai>=1.50.0",
     "python-dotenv>=1.0.0",
     "pytest>=7.0.0",
     "fulcra-api>=0.1.40",

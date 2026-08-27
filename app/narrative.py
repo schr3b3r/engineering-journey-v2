@@ -222,27 +222,79 @@ def format_narrative_document(
     if not paced_rollups:
         paced_rollups = sorted_rollups
 
-    period_sections = []
+    # Group by period window (period_type, start_time, end_time) so a
+    # period with real cross-repo summary_text (written back by
+    # summarize_periods_and_write_back -- see summarization.py) renders
+    # as ONE synthesized paragraph spanning every repo active that
+    # period, matching the narrative structure that made v1's output
+    # engaging, instead of one mechanical bullet per single-repo rollup.
+    # A period with no real summary_text yet still renders per-repo (the
+    # original behavior), so this degrades honestly rather than hiding
+    # data when summarization hasn't been run.
+    period_groups: Dict[Tuple[str, str, str], List[ActivityRollup]] = {}
+    period_order: List[Tuple[str, str, str]] = []
     for r in paced_rollups:
-        repo_part = f" (`{r.repo}`)" if r.repo else ""
-        summary = r.summary_text or generate_fallback_summary(r)
-        
-        # Match signals for this rollup
-        matching_sig = next(
-            (s for s in sorted_signals if s.start_time == r.start_time and s.period_type == r.period_type and s.repo == r.repo),
-            None,
-        )
-        sig_str = ""
-        if matching_sig:
-            cats = f" [{', '.join(matching_sig.categories)}]" if matching_sig.categories else ""
-            sig_str = f" - *Notability Score:* `{matching_sig.score:.1f}/100`{cats}"
+        key = (r.period_type, r.start_time, r.end_time)
+        if key not in period_groups:
+            period_groups[key] = []
+            period_order.append(key)
+        period_groups[key].append(r)
 
-        rec_id_str = f" (Record ID: `{r.get_source_id()}`)"
-        period_sections.append(
-            f"### Period: {r.start_time[:10]} to {r.end_time[:10]}{repo_part}\n"
-            f"- **Activity Count:** {r.total_activity_count} activities{sig_str}\n"
-            f"- **Summary:** {summary}{rec_id_str}\n"
+    period_sections = []
+    for key in period_order:
+        group = period_groups[key]
+        period_type, start_time, end_time = key
+        repos_in_period = sorted({r.repo for r in group if r.repo})
+
+        # A real, written-back cross-repo summary exists if every rollup
+        # in this period group shares the same non-fallback summary_text
+        # (see write_back_period_summary: it deliberately writes the
+        # identical string to every rollup in a group).
+        summary_texts = {r.summary_text for r in group}
+        has_shared_real_summary = (
+            len(summary_texts) == 1
+            and next(iter(summary_texts)) is not None
+            and len(group) >= 1
         )
+
+        total_count_this_period = sum(r.total_activity_count for r in group)
+        rec_ids_str = ", ".join(f"`{r.get_source_id()}`" for r in group)
+
+        if has_shared_real_summary and len(repos_in_period) > 0:
+            shared_summary = next(iter(summary_texts))
+            repo_list_str = ", ".join(f"`{repo}`" for repo in repos_in_period)
+            period_sections.append(
+                f"### {start_time[:10]} to {end_time[:10]} ({period_type})\n"
+                f"- **Repositories:** {repo_list_str}\n"
+                f"- **Total Activity Across Repos:** {total_count_this_period}\n"
+                f"- **Summary:** {shared_summary}\n"
+                f"- **Source Rollup Records:** {rec_ids_str}\n"
+            )
+        else:
+            # Fall back to the original per-repo rendering for this
+            # period, honestly (each rollup gets its own line, using its
+            # own summary_text or the deterministic per-rollup fallback)
+            # -- rather than pretending a cross-repo synthesis happened
+            # when summarize_periods_and_write_back was never run.
+            for r in sorted(group, key=lambda x: x.repo or ""):
+                repo_part = f" (`{r.repo}`)" if r.repo else ""
+                summary = r.summary_text or generate_fallback_summary(r)
+
+                matching_sig = next(
+                    (s for s in sorted_signals if s.start_time == r.start_time and s.period_type == r.period_type and s.repo == r.repo),
+                    None,
+                )
+                sig_str = ""
+                if matching_sig:
+                    cats = f" [{', '.join(matching_sig.categories)}]" if matching_sig.categories else ""
+                    sig_str = f" - *Notability Score:* `{matching_sig.score:.1f}/100`{cats}"
+
+                rec_id_str = f" (Record ID: `{r.get_source_id()}`)"
+                period_sections.append(
+                    f"### Period: {r.start_time[:10]} to {r.end_time[:10]}{repo_part}\n"
+                    f"- **Activity Count:** {r.total_activity_count} activities{sig_str}\n"
+                    f"- **Summary:** {summary}{rec_id_str}\n"
+                )
 
     paced_story = "\n".join(period_sections) if period_sections else "_No period rollups available._\n"
 

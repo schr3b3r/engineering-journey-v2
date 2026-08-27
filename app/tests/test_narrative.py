@@ -133,6 +133,90 @@ def test_narrative_generation_and_provenance_verification() -> None:
     assert verify_narrative_provenance(bad_doc, [r1, r2], [s1]) is False
 
 
+def test_paced_narrative_renders_one_cross_repo_paragraph_when_summaries_match() -> None:
+    """Regression for GitHub issue #2: when multiple repos' rollups in
+    the SAME period window share one real, written-back summary_text
+    (the shape summarize_periods_and_write_back produces), the paced
+    narrative must render ONE consolidated cross-repo paragraph, not one
+    bullet per single-repo rollup."""
+    shared_summary = (
+        "octocat drove a coordinated push across web and api this month, "
+        "shipping a UI overhaul alongside a matching backend endpoint."
+    )
+    r1 = ActivityRollup(
+        period_type="month", start_time="2024-04-01T00:00:00Z", end_time="2024-04-30T23:59:59Z",
+        github_identity="octocat", repo="octocat/web", counts={"commit": 3}, total_activity_count=3,
+        summary_text=shared_summary, record_id="rollup_web_001",
+    )
+    r2 = ActivityRollup(
+        period_type="month", start_time="2024-04-01T00:00:00Z", end_time="2024-04-30T23:59:59Z",
+        github_identity="octocat", repo="octocat/api", counts={"pr_merge": 1}, total_activity_count=1,
+        summary_text=shared_summary, record_id="rollup_api_001",
+    )
+
+    doc = format_narrative_document(
+        github_identity="octocat",
+        range_label="year_2024",
+        start_time="2024-01-01T00:00:00Z",
+        end_time="2024-12-31T23:59:59Z",
+        rollups=[r1, r2],
+        signals=[],
+    )
+
+    start = doc.find("## Paced Activity Narrative")
+    end = doc.find("---", start)
+    paced_section = doc[start:end]
+
+    # Exactly one consolidated heading for the period, not two per-repo
+    # "### Period: ..." headings.
+    assert paced_section.count("### 2024-04-01 to 2024-04-30 (month)") == 1
+    assert "### Period: 2024-04-01" not in paced_section
+    assert shared_summary in paced_section
+    # Only ONE copy of the shared summary text should appear (not
+    # duplicated once per repo).
+    assert paced_section.count(shared_summary) == 1
+    assert "`octocat/web`" in paced_section
+    assert "`octocat/api`" in paced_section
+    assert "`rollup_web_001`" in paced_section
+    assert "`rollup_api_001`" in paced_section
+
+
+def test_paced_narrative_falls_back_to_per_repo_when_no_shared_summary() -> None:
+    """When rollups in the same period DON'T share a real summary (no
+    summarize_periods_and_write_back run yet), the narrative must
+    honestly fall back to per-repo rendering with the deterministic
+    fallback summary -- not silently claim a cross-repo synthesis that
+    never happened."""
+    r1 = ActivityRollup(
+        period_type="month", start_time="2024-04-01T00:00:00Z", end_time="2024-04-30T23:59:59Z",
+        github_identity="octocat", repo="octocat/web", counts={"commit": 3}, total_activity_count=3,
+        record_id="rollup_web_002",
+    )
+    r2 = ActivityRollup(
+        period_type="month", start_time="2024-04-01T00:00:00Z", end_time="2024-04-30T23:59:59Z",
+        github_identity="octocat", repo="octocat/api", counts={"pr_merge": 1}, total_activity_count=1,
+        record_id="rollup_api_002",
+    )
+
+    doc = format_narrative_document(
+        github_identity="octocat",
+        range_label="year_2024",
+        start_time="2024-01-01T00:00:00Z",
+        end_time="2024-12-31T23:59:59Z",
+        rollups=[r1, r2],
+        signals=[],
+    )
+
+    start = doc.find("## Paced Activity Narrative")
+    end = doc.find("---", start)
+    paced_section = doc[start:end]
+
+    # Falls back to two separate per-repo period sections.
+    assert paced_section.count("### Period: 2024-04-01 to 2024-04-30 (`octocat/web`)") == 1
+    assert paced_section.count("### Period: 2024-04-01 to 2024-04-30 (`octocat/api`)") == 1
+    assert "### 2024-04-01 to 2024-04-30 (month)" not in paced_section
+
+
 def test_narrative_generator_end_to_end_mock(mock_fulcra_client: MockFulcraClient) -> None:
     client = mock_fulcra_client
     rollup_engine = RollupEngine(client)
