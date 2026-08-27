@@ -17,6 +17,7 @@ from github_auth import get_github_auth_token, get_token_identity
 from github_spike import GitHubAPISpike
 from narrative import NarrativeGenerator
 from notability import NotabilityEngine
+from raw_ingestion import RawActivityIngestor
 from rollups import RollupEngine
 from summarization import RollupSummarizer
 
@@ -70,10 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
     # 6. PIPELINE / RUN-ALL command
     pipeline_parser = subparsers.add_parser("pipeline", aliases=["run-all"], help="Execute complete pipeline (backfill -> rollups -> notability -> narrative).")
     pipeline_parser.add_argument("--years", type=float, default=1.0, help="Years of history to backfill and report.")
+    pipeline_parser.add_argument("--since", type=str, help="Start ISO timestamp (overrides --years for backfill/rollup/summarize).")
+    pipeline_parser.add_argument("--until", type=str, help="End ISO timestamp (overrides --years for backfill/rollup/summarize).")
     pipeline_parser.add_argument("--range", type=str, default="full", help="Narrative range selection.")
     pipeline_parser.add_argument("--identity", type=str, help="GitHub username.")
+    pipeline_parser.add_argument("--repo", type=str, help="Optional specific repo to backfill (owner/repo).")
     pipeline_parser.add_argument("--output", type=str, help="Path for narrative output file.")
     pipeline_parser.add_argument("--yes", "-y", action="store_true", help="Auto-accept GitHub auth session.")
+    pipeline_parser.add_argument("--device-code", action="store_true", help="Force GitHub device-code auth flow.")
+    pipeline_parser.add_argument("--dry-run", action="store_true", help="Perform discovery/pre-checks without writing raw records (backfill step only; skips rollup/summarize/narrative since there is no real data to act on).")
 
     return parser
 
@@ -166,22 +172,29 @@ def handle_rollup(args: argparse.Namespace) -> int:
     since_iso = args.since or start_dt.isoformat().replace("+00:00", "Z")
     until_iso = args.until or end_dt.isoformat().replace("+00:00", "Z")
 
-    print(f"\n--- Computing Activity Rollups ({since_iso[:10]} to {until_iso[:10]}) ---")
-    rollup_engine = RollupEngine(client=f_client)
-    rollups = rollup_engine.compute_and_store_rollups(
+    print(f"\n--- Fetching Raw Activity ({since_iso[:10]} to {until_iso[:10]}) ---")
+    raw_ingestor = RawActivityIngestor(client=f_client)
+    raw_items = raw_ingestor.get_raw_activities(
         github_identity=identity,
         start_time=since_iso,
         end_time=until_iso,
     )
-    print(f"Successfully stored {len(rollups)} activity rollups across period types.")
+    print(f"Found {len(raw_items)} raw activity records to roll up.")
+
+    print(f"\n--- Computing Activity Rollups ({since_iso[:10]} to {until_iso[:10]}) ---")
+    rollup_engine = RollupEngine(client=f_client)
+    rollups_by_period = rollup_engine.generate_all_rollups(
+        raw_items=raw_items,
+        github_identity=identity,
+        save_to_fulcra=True,
+    )
+    all_rollups = [r for period_rollups in rollups_by_period.values() for r in period_rollups]
+    print(f"Successfully stored {len(all_rollups)} activity rollups across period types.")
 
     print(f"\n--- Computing Notability Signals ({since_iso[:10]} to {until_iso[:10]}) ---")
     notability_engine = NotabilityEngine(client=f_client)
-    signals = notability_engine.compute_and_store_notability_signals(
-        github_identity=identity,
-        start_time=since_iso,
-        end_time=until_iso,
-    )
+    signals = notability_engine.compute_signals(all_rollups)
+    notability_engine.save_signals(signals)
     print(f"Successfully stored {len(signals)} notability signal records.")
 
     return 0
@@ -203,17 +216,22 @@ def handle_summarize(args: argparse.Namespace) -> int:
     since_iso = args.since or start_dt.isoformat().replace("+00:00", "Z")
     until_iso = args.until or end_dt.isoformat().replace("+00:00", "Z")
 
-    summarizer = RollupSummarizer(client=f_client)
-    prompt = summarizer.build_summarization_prompt(
+    rollup_engine = RollupEngine(client=f_client)
+    rollups = rollup_engine.get_rollups(
         github_identity=identity,
         start_time=since_iso,
         end_time=until_iso,
     )
+    print(f"\n--- Preparing Summarization Handoff ({len(rollups)} rollups) ---")
 
-    print("\n--- Harness Task Prompt for Rollup Summarization ---")
-    print(prompt[:1500])
-    if len(prompt) > 1500:
-        print(f"\n... [{len(prompt) - 1500} characters truncated]")
+    summarizer = RollupSummarizer(client=f_client)
+    handoff_payloads = summarizer.prepare_handoff(rollups)
+
+    print("\n--- Harness Task Prompts for Rollup Summarization ---")
+    preview = json.dumps(handoff_payloads[:1], indent=2) if handoff_payloads else "[]"
+    print(preview[:1500])
+    if len(preview) > 1500:
+        print(f"\n... [{len(preview) - 1500} characters truncated; {len(handoff_payloads)} total payload(s)]")
 
     return 0
 
@@ -258,6 +276,14 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     ret = handle_backfill(args)
     if ret != 0:
         return ret
+
+    if getattr(args, "dry_run", False):
+        print(
+            "\n[Dry Run] Backfill was a discovery-only dry run; skipping "
+            "rollup/summarize/narrative steps since there is no real "
+            "ingested data yet for them to act on."
+        )
+        return 0
 
     # Step 2: Rollups & Notability
     ret = handle_rollup(args)

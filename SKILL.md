@@ -34,8 +34,41 @@ cd app
 python cli.py auth
 ```
 
+**Known issue on first-ever login:** `fulcra-api auth login --get-auth-url`
+can throw an unhandled `FileNotFoundError` if `~/.config/fulcra/` does not
+already exist yet (the `fulcra-api` SDK's CLI creates it with `os.mkdir()`
+instead of `os.makedirs(..., exist_ok=True)` -- a bug in the `fulcra-api`
+PyPI package itself, not this repo). If you hit this on a fresh machine,
+create the directory yourself first as a workaround:
+```bash
+mkdir -p ~/.config/fulcra
+fulcra-api auth login --get-auth-url
+```
+
 ### GitHub Credentials
 GitHub authentication defaults to browser-based OAuth device-code flow per RFC 8628. If an existing `gh` CLI session or `GITHUB_TOKEN` is present, the CLI asks for explicit user confirmation before using it.
+
+**Cloud-sandboxed/agent environments should default to a PAT, not the
+device-code flow.** GitHub's anti-abuse rules appear to block OAuth
+device-flow token issuance (`/login/device/code`,
+`/login/oauth/access_token`) from datacenter/cloud-provider IP ranges --
+confirmed against a GCP-hosted sandbox, where every other GitHub API
+endpoint responded normally but those two specifically returned a bare
+`404 Not Found` with no explanation. If you're running this from an
+agent sandbox, CI runner, or any other cloud-hosted environment (rather
+than an interactive session on a personal machine), skip
+`--device-code` entirely and set `GITHUB_TOKEN` to a
+[Personal Access Token](https://github.com/settings/tokens) with `repo`
+and `read:user` scopes instead -- `get_github_auth_token()` picks this up
+automatically without any device-code prompt:
+```bash
+export GITHUB_TOKEN=ghp_your_token_here
+python cli.py auth --yes
+```
+A generic 404 with no other symptoms when the device-code flow otherwise
+looks correctly implemented is the signature of this: it is not a bug
+in this repo's `github_auth.py`, and retrying/debugging the network
+request will not resolve it from that kind of environment.
 
 ---
 
