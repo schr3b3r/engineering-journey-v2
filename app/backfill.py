@@ -77,7 +77,9 @@ class BackfillEngine:
 
         # Step 1: Discover repos if not explicitly supplied
         if repos is None:
+            print(f"Discovering repositories for {github_identity}...")
             repos = self.github_api.discover_user_repos(github_identity)
+        print(f"Discovered {len(repos)} repositories. Processing...")
 
         repos_total = len(repos)
         repos_covered: List[str] = []
@@ -87,11 +89,25 @@ class BackfillEngine:
         total_records_ingested = 0
         remaining_kill_budget = kill_after_n_records
         interrupted = False
+        last_progress_time = time.perf_counter()
 
         # Step 2: Process each repo
-        for repo in repos:
+        for repo_index, repo in enumerate(repos, start=1):
             if interrupted:
                 break
+
+            # Periodic progress line: every 25 repos, or every 15 seconds,
+            # whichever comes first -- this loop can otherwise run silently
+            # for many minutes across a large repo count with zero visible
+            # output between the initial discovery line and the final
+            # summary, making it indistinguishable from a hang.
+            now = time.perf_counter()
+            if repo_index == 1 or repo_index % 25 == 0 or (now - last_progress_time) >= 15:
+                print(
+                    f"[{repo_index}/{repos_total}] repos processed "
+                    f"({len(repos_active)} active, {total_records_ingested} records so far)..."
+                )
+                last_progress_time = now
 
             # 2a: Calculate sub-ranges not yet covered by completed checkpoints
             uncovered_ranges = self.checkpoint_manager.get_uncovered_ranges(

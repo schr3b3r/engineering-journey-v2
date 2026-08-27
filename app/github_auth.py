@@ -98,11 +98,26 @@ def run_device_code_flow(
 
     try:
         resp = requests.post(DEVICE_CODE_URL, headers=headers, data=data, timeout=10)
+        if resp.status_code == 404:
+            raise RuntimeError(
+                "GitHub's device-code endpoint returned 404 Not Found. If "
+                "every other GitHub API call works normally from this "
+                "environment, this is very likely GitHub blocking OAuth "
+                "device-flow token issuance from a datacenter/cloud-"
+                "provider IP range (an anti-abuse rule), not an error in "
+                "this code or your request. This is common in cloud-hosted "
+                "agent sandboxes and CI runners. Set GITHUB_TOKEN to a "
+                "Personal Access Token (repo, read:user scopes) instead of "
+                "using --device-code -- see SKILL.md's GitHub Credentials "
+                "section for details."
+            )
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Failed to initiate device code flow: {resp.status_code} {resp.text}"
             )
         resp_data = resp.json()
+    except RuntimeError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"Error connecting to GitHub OAuth device code endpoint: {exc}") from exc
 
