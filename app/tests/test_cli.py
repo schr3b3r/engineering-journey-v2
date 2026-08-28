@@ -266,3 +266,17 @@ def test_cli_pipeline_dry_run_skips_rollup_summarize_narrative(monkeypatch):
                         assert ret == 0
                         mock_rollup.assert_not_called()
                         mock_narrative.assert_not_called()
+
+
+def test_pipeline_provider_preflight_fails_before_backfill(capsys):
+    """Issue #7: missing model credentials must not be discovered after a long run."""
+    args = build_parser().parse_args([
+        "pipeline", "--identity", "octocat", "--yes",
+    ])
+    failed_check = MagicMock(returncode=2)
+    with patch("subprocess.run", return_value=failed_check) as run_check:
+        with patch("cli.handle_backfill") as backfill:
+            assert handle_pipeline(args) == 2
+    backfill.assert_not_called()
+    assert "--check-provider" in run_check.call_args.args[0]
+    assert "No backfill was started" in capsys.readouterr().err
