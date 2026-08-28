@@ -32,6 +32,20 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Overview synthesis (issue #18) now requires an ephemeral `narrative_plan`
+(trajectory thesis, 1-3 dominant arcs with raw_record_ids, turning points, an
+optional culmination) before the agent drafts the Overview, so prose reads as
+a selective story rather than an inventory of every repository/category. The
+handoff includes a range-adaptive `overview_brief` (evidence density,
+recommended arc count, scope guidance) that scales with the requested range
+without imposing a fixed template. The publisher deterministically rejects a
+missing/malformed plan, more than 3 dominant arcs, and unsupported
+evaluative/leadership language (e.g. "spearheaded", "led", "robust", "secure",
+"high-impact", "production-grade") anywhere in the plan, overview, or section
+prose — a word-boundary-aware scan (`_find_forbidden_phrases`) avoids
+false-positives like "led" inside "enabled"/"scheduled". `AGENT_HANDOFF_VERSION`
+bumped 2→3 for this schema change so stale in-flight handoffs are rejected.
+
 Canonical ingestion now writes one `GitHub History Coverage` duration per
 completed run/window and complete repository snapshot. `Engineering Journey
 Run` moments are the only operational progress state. Raw fingerprints handle
@@ -104,6 +118,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(issue #18)** Overview editorial synthesis without weakening grounding: response schema gained a required, non-persisted `narrative_plan` (trajectory thesis + ≤3 dominant arcs + turning points + optional culmination, each with real `raw_record_ids`) so the agent commits to editorial selection before drafting prose, rather than mirroring chunk/month boundaries. `overview_brief` gives range-adaptive scope guidance (evidence density → recommended arc count) without forcing a fixed 3-year template onto short ranges or vice versa. A word-boundary-aware forbidden-phrase scan (`UNSUPPORTED_EVALUATIVE_PHRASES`) deterministically rejects unsupported leadership/evaluative language anywhere in the plan, overview, or sections. `AGENT_HANDOFF_VERSION` 2→3.
 - **(post-#17 temporal simplification)** One completed immutable run equals one `GitHub History Coverage` source-time bar whose repository snapshot includes active and zero-activity repos. `Engineering Journey Run` is the sole canonical operational state. Per-repo coverage/progress types are retired to migration compatibility, reducing Timeline bars from O(repositories) to O(completed windows).
 
 - **(post-#13 progress UX correction)** Structured events alone do not inform a user when an agent consumes them silently. `progress-status` provides deterministic summarization, while the skill mandates alternating monitor-tool cycles with actual commentary and caps waits at 15 seconds.

@@ -219,6 +219,27 @@ def test_raw_complete_resume_skips_github_reuses_window_and_publishes(
     ]
     response = {
         "context_id": handoff["context_id"],
+        "narrative_plan": {
+            "trajectory_thesis": (
+                "Work connected API and web capability into one coordinated effort."
+            ),
+            "dominant_arcs": [
+                {
+                    "arc_id": "combined-capability",
+                    "label": "Coordinated API and web capability work",
+                    "start_time": "2025-01-01T00:00:00Z",
+                    "end_time": "2025-02-01T00:00:00Z",
+                    "raw_record_ids": raw_ids,
+                    "repositories": sorted({
+                        item["repository"]
+                        for chunk in handoff["chunks"]
+                        for item in chunk["evidence"]
+                    }),
+                }
+            ],
+            "turning_points": [],
+            "culmination": None,
+        },
         "overview": "The period connected API and web capability work into one grounded engineering trajectory.",
         "sections": [
             {
