@@ -239,18 +239,27 @@ The deterministic publisher rejects modified/wrong-run context, a missing or
 malformed `narrative_plan`, more than three dominant arcs, unsupported
 evaluative/leadership language anywhere in the plan/overview/sections,
 malformed or out-of-order sections, and missing/duplicate/unknown raw IDs. On
-success it:
+success it publishes **two files** as same-folder siblings:
 
-1. assembles the chronological markdown and raw-record provenance appendix;
-2. writes the local markdown; and
-3. uploads the final artifact to:
+1. **the narrative** — story overview, sections, and a short evidence summary
+   (record/repository counts plus the small per-section evidence table). It
+   never contains the full raw-record table, so it stays readable no matter
+   how many raw records back the story.
+2. **the sources file** (same name with a `_sources` suffix) — the complete
+   raw GitHub activity evidence table (record ID, date, repository, type,
+   title, GitHub URL) for every record the handoff exposed. This is where
+   full per-record provenance lives; it is allowed to scale with evidence
+   volume.
+
+Both are written locally and uploaded to:
 
 ```text
 
 /engineering-journeys/<identity>/<writing-year>/
 ```
 
-Report both printed paths to the user and briefly summarize what was produced.
+Report all four paths (local narrative, local sources, Fulcra narrative,
+Fulcra sources) to the user and briefly summarize what was produced.
 
 ## Resume and rewriting
 
