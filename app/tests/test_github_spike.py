@@ -111,6 +111,29 @@ def test_fetch_commits_mocked() -> None:
         assert items[0].title_or_summary == "Initial commit"
 
 
+def test_fetch_all_activity_reports_each_long_stage() -> None:
+    progress = []
+    spike = GitHubAPISpike(
+        token="fake", base_url="https://fake.github.api",
+        progress_callback=progress.append,
+    )
+    item = GitHubActivityItem(
+        "commit", "owner/repo", "dev", "sha", "2025-01-02T00:00:00Z",
+        "Commit", "",
+    )
+    with patch.object(spike, "fetch_commits", return_value=[item]):
+        with patch.object(spike, "fetch_pull_requests", return_value=[]):
+            with patch.object(spike, "fetch_comments", return_value=[]):
+                assert spike.fetch_all_repo_activity(
+                    "owner/repo", "dev", "2025-01-01T00:00:00Z",
+                    "2025-02-01T00:00:00Z",
+                ) == [item]
+    assert any("fetching commits" in message for message in progress)
+    assert any("fetching pull requests" in message for message in progress)
+    assert any("fetching comments/reviews" in message for message in progress)
+    assert "fetch complete" in progress[-1]
+
+
 def test_fulcra_agg_day_check_failure_path() -> None:
     """Verify check_fulcra_agg_day_availability reports False and a
     non-misleading conclusion when the real endpoint call fails, without

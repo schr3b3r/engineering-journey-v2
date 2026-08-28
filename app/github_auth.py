@@ -22,6 +22,19 @@ TOKEN_URL = "https://github.com/login/oauth/access_token"
 USER_API_URL = "https://api.github.com/user"
 
 
+class ExistingAuthConfirmationRequired(RuntimeError):
+    """A non-interactive caller found auth but did not explicitly confirm it."""
+
+    def __init__(self, message: str, identity: str, source: str) -> None:
+        super().__init__(message)
+        self.identity = identity
+        self.source = source
+
+
+class GitHubAuthenticationCancelled(RuntimeError):
+    """The user chose not to use or replace the detected GitHub account."""
+
+
 def get_token_identity(token: str) -> Optional[str]:
     """Fetch GitHub username associated with a given auth token."""
     headers = {
@@ -201,23 +214,47 @@ def get_github_auth_token(
             source = existing["source"]
             identity = existing["identity"] or "unknown identity"
 
-            if auto_accept_existing or not confirm_existing or not sys.stdin.isatty():
+            if auto_accept_existing or not confirm_existing:
                 print(f"Using existing GitHub authentication from {source} (User: {identity}).")
                 return token
 
-            print(f"\nDetected existing GitHub session from {source}:")
-            print(f"  User identity: {identity}")
+            print(f"\nDetected existing GitHub authentication from {source}:", flush=True)
+            print(f"  Active account: {identity}", flush=True)
+
+            if not sys.stdin.isatty():
+                raise ExistingAuthConfirmationRequired(
+                    f"GitHub account '{identity}' is active via {source}, but this "
+                    "non-interactive run has not confirmed it. Ask the user whether "
+                    "to use this account or authenticate differently; only after "
+                    "they approve may you rerun with --yes, or use --device-code "
+                    "to authenticate another account.",
+                    identity=identity,
+                    source=source,
+                )
             
             try:
-                ans = input(f"Do you want to use this session ({identity})? [Y/n]: ").strip().lower()
+                ans = input(
+                    "Choose: [Y] use this account, [n] authenticate a different "
+                    "account, [q] cancel: "
+                ).strip().lower()
                 if ans in ("", "y", "yes"):
                     print(f"Confirmed: Using existing GitHub session for {identity}.")
                     return token
-                else:
+                if ans in ("n", "no", "different", "d"):
                     print("Declined existing session. Initiating OAuth device-code flow...")
+                elif ans in ("q", "quit", "c", "cancel"):
+                    raise GitHubAuthenticationCancelled(
+                        "Cancelled before using the detected GitHub account."
+                    )
+                else:
+                    raise GitHubAuthenticationCancelled(
+                        f"Unrecognized choice {ans!r}; cancelled without using an account."
+                    )
             except (KeyboardInterrupt, EOFError):
-                print("\nUsing detected session by default.")
-                return token
+                raise GitHubAuthenticationCancelled(
+                    "Authentication confirmation was interrupted; the detected "
+                    "GitHub account was not used."
+                )
 
     # Fallback / Default: OAuth Device Code Flow
     return run_device_code_flow(client_id=client_id)

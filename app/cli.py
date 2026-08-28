@@ -13,7 +13,12 @@ from typing import List, Optional
 
 from backfill import BackfillEngine
 from fulcra_client import FulcraAuthError, get_fulcra_client
-from github_auth import get_github_auth_token, get_token_identity
+from github_auth import (
+    ExistingAuthConfirmationRequired,
+    GitHubAuthenticationCancelled,
+    get_github_auth_token,
+    get_token_identity,
+)
 from github_spike import GitHubAPISpike
 from narrative import NarrativeGenerator, NarrativeUploadError
 from notability import NotabilityEngine
@@ -33,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 1. AUTH command
     auth_parser = subparsers.add_parser("auth", help="Check or perform GitHub and Fulcra authentication.")
     auth_parser.add_argument("--device-code", action="store_true", help="Force GitHub browser-based device code flow.")
-    auth_parser.add_argument("--yes", "-y", action="store_true", help="Auto-accept detected existing GitHub session.")
+    auth_parser.add_argument("--yes", "-y", action="store_true", help="Confirm a previously reviewed GitHub account non-interactively.")
 
     # 2. BACKFILL command
     backfill_parser = subparsers.add_parser("backfill", help="Ingest raw GitHub activity into Fulcra.")
@@ -42,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--until", type=str, help="End ISO timestamp (e.g. 2025-01-01T00:00:00Z).")
     backfill_parser.add_argument("--identity", type=str, help="GitHub username/identity.")
     backfill_parser.add_argument("--repo", type=str, help="Optional specific repo to backfill (owner/repo).")
-    backfill_parser.add_argument("--yes", "-y", action="store_true", help="Auto-accept detected GitHub auth.")
+    backfill_parser.add_argument("--yes", "-y", action="store_true", help="Confirm the displayed account and run plan non-interactively.")
     backfill_parser.add_argument("--device-code", action="store_true", help="Force GitHub device-code auth flow.")
     backfill_parser.add_argument("--dry-run", action="store_true", help="Perform discovery/pre-checks without writing raw records.")
 
@@ -78,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--identity", type=str, help="GitHub username.")
     pipeline_parser.add_argument("--repo", type=str, help="Optional specific repo to backfill (owner/repo).")
     pipeline_parser.add_argument("--output", type=str, help="Path for narrative output file.")
-    pipeline_parser.add_argument("--yes", "-y", action="store_true", help="Auto-accept GitHub auth session.")
+    pipeline_parser.add_argument("--yes", "-y", action="store_true", help="Confirm a previously reviewed GitHub account and run plan.")
     pipeline_parser.add_argument("--device-code", action="store_true", help="Force GitHub device-code auth flow.")
     pipeline_parser.add_argument("--dry-run", action="store_true", help="Perform discovery/pre-checks without writing raw records (backfill step only; skips rollup/summarize/narrative since there is no real data to act on).")
     pipeline_parser.add_argument(
@@ -100,59 +105,149 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _emit(message: str = "") -> None:
+    """Print progress immediately, including through buffered agent shells."""
+    print(message, flush=True)
+
+
+def _activity_window(args: argparse.Namespace) -> tuple[str, str]:
+    end_dt = datetime.now(timezone.utc)
+    start_dt = datetime.fromtimestamp(
+        end_dt.timestamp() - (args.years * 365.25 * 86400), tz=timezone.utc
+    )
+    return (
+        args.since or start_dt.isoformat().replace("+00:00", "Z"),
+        args.until or end_dt.isoformat().replace("+00:00", "Z"),
+    )
+
+
+def _confirm_backfill_plan(
+    args: argparse.Namespace,
+    authenticated_identity: str,
+    target_identity: str,
+    since_iso: str,
+    until_iso: str,
+) -> bool:
+    start_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+    end_dt = datetime.fromisoformat(until_iso.replace("Z", "+00:00"))
+    if start_dt >= end_dt:
+        _emit("Error: activity start time must be before end time.")
+        return False
+    duration_days = (end_dt - start_dt).total_seconds() / 86400
+    pipeline = args.command in ("pipeline", "run-all")
+    _emit("\n" + "=" * 60)
+    _emit(" Review Engineering Journey Run Plan")
+    _emit("=" * 60)
+    _emit(f"Authenticated GitHub account: {authenticated_identity}")
+    _emit(f"Activity identity:            {target_identity}")
+    _emit(f"Activity range (UTC):         {since_iso}  →  {until_iso}")
+    _emit(f"Range duration:               {duration_days:.1f} days")
+    _emit(f"Repository scope:             {args.repo or 'all accessible repositories'}")
+    _emit(f"Mode:                         {'discovery only; no writes' if args.dry_run else 'write durable records to Fulcra'}")
+    if pipeline and not args.dry_run:
+        _emit("Stages:                       backfill → rollups → notability → LLM synthesis → narrative → Fulcra file")
+    else:
+        _emit("Stages:                       repository discovery → coverage checks → raw ingestion")
+    _emit("=" * 60)
+
+    if args.yes:
+        _emit("Plan confirmed via --yes (use only after the user has reviewed it).")
+        return True
+    if not sys.stdin.isatty():
+        _emit(
+            "Plan not started: this is a non-interactive session. Show the plan "
+            "above to the user, then rerun with --yes only if they approve."
+        )
+        return False
+    try:
+        answer = input("Proceed with this exact plan? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        _emit("\nCancelled; no backfill work was started.")
+        return False
+    if answer not in ("y", "yes"):
+        _emit("Cancelled; no backfill work was started.")
+        return False
+    _emit("Plan confirmed. Starting now; progress will continue below.")
+    return True
+
+
 def handle_auth(args: argparse.Namespace) -> int:
     """Handle authentication check/flow."""
-    print("=== Checking Fulcra Authentication ===")
+    _emit("=== Checking Fulcra Authentication ===")
     try:
-        f_client = get_fulcra_client()
-        print("Fulcra authentication: SUCCESS")
+        get_fulcra_client()
+        _emit("Fulcra authentication: SUCCESS")
     except FulcraAuthError as err:
-        print(f"Fulcra authentication: FAILED ({err})")
+        _emit(f"Fulcra authentication: FAILED ({err})")
         return 1
 
-    print("\n=== Checking GitHub Authentication ===")
-    token = get_github_auth_token(
-        confirm_existing=not args.yes,
-        force_device_code=args.device_code,
-        auto_accept_existing=args.yes,
-    )
+    _emit("\n=== Checking GitHub Authentication ===")
+    try:
+        token = get_github_auth_token(
+            confirm_existing=not args.yes,
+            force_device_code=args.device_code,
+            auto_accept_existing=args.yes,
+        )
+    except (ExistingAuthConfirmationRequired, GitHubAuthenticationCancelled) as err:
+        print(f"GitHub authentication not used: {err}", file=sys.stderr, flush=True)
+        return 2
     identity = get_token_identity(token) or "unknown"
-    print(f"GitHub authentication: SUCCESS (User: {identity})")
+    _emit(f"GitHub authentication: SUCCESS (User: {identity})")
     return 0
 
 
 def handle_backfill(args: argparse.Namespace) -> int:
-    """Execute raw GitHub activity backfill."""
+    """Review and execute a raw GitHub activity backfill."""
     try:
         f_client = get_fulcra_client()
     except FulcraAuthError as err:
-        print(f"Error: Fulcra client failed: {err}", file=sys.stderr)
+        print(f"Error: Fulcra client failed: {err}", file=sys.stderr, flush=True)
         return 1
 
-    token = get_github_auth_token(
-        confirm_existing=not args.yes,
-        force_device_code=args.device_code,
-        auto_accept_existing=args.yes,
-    )
-    identity = args.identity or get_token_identity(token)
+    try:
+        token = get_github_auth_token(
+            confirm_existing=not args.yes,
+            force_device_code=args.device_code,
+            auto_accept_existing=args.yes,
+        )
+    except ExistingAuthConfirmationRequired as err:
+        # Planning is local and safe: show account and range together so an
+        # agent can obtain one informed approval before rerunning with --yes.
+        since_iso, until_iso = _activity_window(args)
+        target_identity = args.identity or err.identity
+        _confirm_backfill_plan(
+            args, err.identity, target_identity, since_iso, until_iso
+        )
+        print(f"GitHub authentication not used: {err}", file=sys.stderr, flush=True)
+        return 2
+    except GitHubAuthenticationCancelled as err:
+        print(f"GitHub authentication not used: {err}", file=sys.stderr, flush=True)
+        return 2
+    authenticated_identity = get_token_identity(token) or "unknown"
+    identity = args.identity or (authenticated_identity if authenticated_identity != "unknown" else None)
     if not identity:
         print("Error: Could not determine GitHub username identity. Pass --identity explicitly.", file=sys.stderr)
         return 1
 
-    print(f"\n--- Initiating Backfill for GitHub identity: {identity} ---")
-    spike = GitHubAPISpike(token=token)
-    engine = BackfillEngine(fulcra_client=f_client, github_api=spike)
+    since_iso, until_iso = _activity_window(args)
+    if not _confirm_backfill_plan(
+        args, authenticated_identity, identity, since_iso, until_iso
+    ):
+        return 2
+    # Downstream stages must keep the exact reviewed identity.
+    args.identity = identity
+
+    _emit(f"\n[backfill] Starting for {identity}; progress will continue below.")
+    spike = GitHubAPISpike(token=token, progress_callback=_emit)
+    engine = BackfillEngine(
+        fulcra_client=f_client, github_api=spike, progress_callback=_emit
+    )
 
     if args.dry_run:
-        print("[Dry Run] Discovering repositories and pre-checking existence...")
+        _emit("[dry-run] Discovering repositories; no records will be written...")
         repos = spike.discover_user_repos(github_identity=identity)
-        print(f"[Dry Run] Discovered {len(repos)} repositories.")
+        _emit(f"[dry-run] Discovery complete: {len(repos)} repositories accessible.")
         return 0
-
-    end_dt = datetime.now(timezone.utc)
-    start_dt = datetime.fromtimestamp(end_dt.timestamp() - (args.years * 365.25 * 86400), tz=timezone.utc)
-    since_iso = args.since or start_dt.isoformat().replace("+00:00", "Z")
-    until_iso = args.until or end_dt.isoformat().replace("+00:00", "Z")
 
     summary = engine.run_backfill(
         github_identity=identity,
@@ -161,14 +256,13 @@ def handle_backfill(args: argparse.Namespace) -> int:
         repos=[args.repo] if args.repo else None,
     )
 
-    print("\n--- Backfill Execution Summary ---")
-    print(f"Identity: {summary.get('github_identity')}")
-    print(f"Total Repos Processed: {summary.get('repos_total')}")
-    print(f"Active Repos Ingested: {len(summary.get('repos_active', []))}")
-    print(f"Total Raw Records Written: {summary.get('records_ingested')}")
-    print(f"GitHub API Calls: {summary.get('api_calls_made')}")
-    print(f"Wall-Clock Time: {summary.get('wall_time_seconds')}s")
-
+    _emit("\n--- Backfill Execution Summary ---")
+    _emit(f"Identity: {summary.get('github_identity')}")
+    _emit(f"Total Repos Processed: {summary.get('repos_total')}")
+    _emit(f"Active Repos Ingested: {len(summary.get('repos_active', []))}")
+    _emit(f"Total Raw Records Written: {summary.get('records_ingested')}")
+    _emit(f"GitHub API Calls: {summary.get('api_calls_made')}")
+    _emit(f"Wall-Clock Time: {summary.get('wall_time_seconds')}s")
     return 0
 
 
@@ -188,16 +282,16 @@ def handle_rollup(args: argparse.Namespace) -> int:
     since_iso = args.since or start_dt.isoformat().replace("+00:00", "Z")
     until_iso = args.until or end_dt.isoformat().replace("+00:00", "Z")
 
-    print(f"\n--- Fetching Raw Activity ({since_iso[:10]} to {until_iso[:10]}) ---")
+    _emit(f"\n[rollup] Fetching durable raw activity ({since_iso[:10]} to {until_iso[:10]})...")
     raw_ingestor = RawActivityIngestor(client=f_client)
     raw_items = raw_ingestor.get_raw_activities(
         github_identity=identity,
         start_time=since_iso,
         end_time=until_iso,
     )
-    print(f"Found {len(raw_items)} raw activity records to roll up.")
+    _emit(f"[rollup] Found {len(raw_items)} raw activity records.")
 
-    print(f"\n--- Computing Activity Rollups ({since_iso[:10]} to {until_iso[:10]}) ---")
+    _emit("[rollup] Computing day, week, month, quarter, and year layers...")
     rollup_engine = RollupEngine(client=f_client)
     rollups_by_period = rollup_engine.generate_all_rollups(
         raw_items=raw_items,
@@ -205,13 +299,13 @@ def handle_rollup(args: argparse.Namespace) -> int:
         save_to_fulcra=True,
     )
     all_rollups = [r for period_rollups in rollups_by_period.values() for r in period_rollups]
-    print(f"Successfully stored {len(all_rollups)} activity rollups across period types.")
+    _emit(f"[rollup] Stored {len(all_rollups)} rollups across all period types.")
 
-    print(f"\n--- Computing Notability Signals ({since_iso[:10]} to {until_iso[:10]}) ---")
+    _emit("[notability] Computing personal-baseline eventfulness signals...")
     notability_engine = NotabilityEngine(client=f_client)
     signals = notability_engine.compute_signals(all_rollups)
     notability_engine.save_signals(signals)
-    print(f"Successfully stored {len(signals)} notability signal records.")
+    _emit(f"[notability] Stored {len(signals)} signals. Derived-data stage complete.")
 
     return 0
 
@@ -289,7 +383,7 @@ def handle_narrative(args: argparse.Namespace) -> int:
     token = get_github_auth_token(auto_accept_existing=True)
     identity = args.identity or get_token_identity(token) or "gklei"
 
-    print(f"\n--- Generating Narrative Document (Range: {args.range}) ---")
+    _emit(f"\n[narrative] Loading summaries and signals for range: {args.range}...")
     generator = NarrativeGenerator(client=f_client)
     try:
         doc_content, filename, rollups, signals = generator.generate_narrative(
@@ -301,6 +395,7 @@ def handle_narrative(args: argparse.Namespace) -> int:
         return 1
 
     out_path = args.output or filename
+    _emit("[narrative] Fulcra upload complete; writing the local convenience copy...")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(doc_content)
 
@@ -319,6 +414,7 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     print("============================================================")
     print(" Engineering Journey v2 — End-to-End Pipeline Execution")
     print("============================================================")
+    _emit("[pipeline] Checking prerequisites; no activity data has been touched yet.")
 
     # Fail before a potentially long GitHub/Fulcra run when the requested
     # quality narrative cannot be generated. Explicit skip is an honest opt-in.
@@ -341,7 +437,8 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             )
             return check.returncode
 
-    # Step 1: Auth check & Backfill
+    # Step 1: Auth check, plan review & Backfill
+    _emit("\n[pipeline 1/4] Confirming account and activity range, then backfilling.")
     ret = handle_backfill(args)
     if ret != 0:
         return ret
@@ -355,6 +452,7 @@ def handle_pipeline(args: argparse.Namespace) -> int:
         return 0
 
     # Step 2: Rollups & Notability
+    _emit("\n[pipeline 2/4] Backfill complete. Building rollups and notability signals.")
     ret = handle_rollup(args)
     if ret != 0:
         return ret
@@ -368,6 +466,7 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     # dependency in app code) -- so this shells out to the harness-side
     # driver script as a separate process, keeping that boundary intact.
     if not getattr(args, "skip_real_summarization", False):
+        _emit("\n[pipeline 3/4] Rollups complete. Starting grounded LLM synthesis.")
         print("\n--- Generating real cross-repo period summaries (scripts/summarize_periods.py) ---")
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         script_path = os.path.join(repo_root, "scripts", "summarize_periods.py")
@@ -401,6 +500,7 @@ def handle_pipeline(args: argparse.Namespace) -> int:
         )
 
     # Step 4: Narrative Generation
+    _emit("\n[pipeline 4/4] Writing the narrative and uploading it to Fulcra.")
     ret = handle_narrative(args)
     return ret
 

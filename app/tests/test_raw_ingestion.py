@@ -346,6 +346,7 @@ def test_ingest_items_does_not_treat_unrelated_range_checkpoint_as_covering(mock
 
 def test_progress_record_count_is_bounded_by_milestones(mock_fulcra_client) -> None:
     repo, identity = "acme/large", "bounded-dev"
+    progress_messages = []
     items = [
         GitHubActivityItem(
             "commit", repo, identity, f"sha-{index}",
@@ -353,7 +354,11 @@ def test_progress_record_count_is_bounded_by_milestones(mock_fulcra_client) -> N
         )
         for index in range(250)
     ]
-    ingestor = RawActivityIngestor(mock_fulcra_client, progress_interval=100)
+    ingestor = RawActivityIngestor(
+        mock_fulcra_client,
+        progress_interval=100,
+        progress_callback=progress_messages.append,
+    )
     count, completed = ingestor.ingest_items(
         items, repo, identity, "2025-01-01T00:00:00Z", "2025-01-31T23:59:59Z"
     )
@@ -369,6 +374,9 @@ def test_progress_record_count_is_bounded_by_milestones(mock_fulcra_client) -> N
     assert len(progress_records) == 2
     assert len(mock_fulcra_client.duration_records) == 1
     assert len(progress_records) < len(items) / 10
+    assert any("25 new" in message for message in progress_messages)
+    assert any("250 new" in message for message in progress_messages)
+    assert "status=completed" in progress_messages[-1]
 
 
 def test_replay_after_progress_loss_does_not_duplicate_raw_records(mock_fulcra_client) -> None:

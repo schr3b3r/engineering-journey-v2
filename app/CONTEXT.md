@@ -32,6 +32,13 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Interactive UX now fails closed instead of "running wild": detected GitHub
+auth offers use-current/auth-different/cancel, and non-TTY agents must show the
+account plus exact run plan before explicitly confirming. The plan includes
+UTC bounds, duration, repo scope, write mode, and stages. Long work emits
+flushed progress for each repository/subrange, GitHub fetch category, ingest
+milestone, rollup/notability stage, model period, narrative, and upload.
+
 Narrative artifact delivery is automatic: `NarrativeGenerator` uploads each
 generated markdown document to the owner's Fulcra file store under
 `/engineering-journeys/<identity>/<writing-year>/`. The readable filename
@@ -94,6 +101,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(post-#11)** Guided, observable execution: account and run-plan approval are distinct user decisions presented together before work. EOF, cancellation, and unconfirmed non-interactive sessions fail closed. `--yes` is valid only after an agent relays the account/plan and obtains explicit approval. Optional progress callbacks keep libraries reusable while CLI/script paths flush continuous contextual output.
 - **(post-#9)** Automatic narrative artifact storage: successful generation includes a Fulcra SDK `upload_file` write by default. Owner paths are organized by identity/writing year and filenames encode activity bounds plus writing date. Programmatic callers can explicitly opt out with `upload_to_fulcra=False`; CLI users receive automatic storage and a printed path.
 - **(issue #9)** Coverage/progress temporal split: completed windows belong in `GitHub Backfill Coverage` DurationAnnotations at source time; bounded cursors belong in `GitHub Backfill Progress` MomentAnnotations at update time. Raw-item existence makes replay idempotent between 100-item milestones. Legacy reads are transitional and cleanup is explicitly non-destructive until separately owner-confirmed.
 - **(issues #5-#7)** Grounded hierarchical narrative synthesis and fail-closed provenance: `ActivityRollup.evidence_items` preserves a bounded semantic projection with raw lineage; old records can be hydrated from durable raw Fulcra items; model prompts use this evidence and forbid unsupported connections. Month summaries provide pacing while quarter/year summaries provide trajectory. Limited mode is explicitly non-equivalent and compact. Appendix parsing is table-structural (UUID-safe) with exact-set validation. The model provider preflight happens before pipeline backfill while retaining `--skip-real-summarization` as an explicit limited-mode opt-in.
