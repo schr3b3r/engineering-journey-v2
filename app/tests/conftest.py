@@ -14,6 +14,7 @@ class MockFulcraClient:
         self.duration_records: List[Dict[str, Any]] = []
         self.moment_records: List[Dict[str, Any]] = []
         self.numeric_records: List[Dict[str, Any]] = []
+        self.uploaded_files: Dict[str, Dict[str, Any]] = {}
 
     def annotations_catalog(self) -> List[Dict[str, Any]]:
         return self.annotations
@@ -126,6 +127,17 @@ class MockFulcraClient:
             if ts and start_time <= ts <= end_time:
                 matching.append(rec)
         return matching
+
+    def upload_file(
+        self, data: Any, file_type: str, file_size: int, filepath: str
+    ) -> Dict[str, str]:
+        payload = data.read() if hasattr(data, "read") else bytes(data)
+        self.uploaded_files[filepath] = {
+            "data": payload,
+            "file_type": file_type,
+            "file_size": file_size,
+        }
+        return {"filepath": filepath}
 
 
 @pytest.fixture

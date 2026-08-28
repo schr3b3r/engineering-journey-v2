@@ -15,7 +15,7 @@ from backfill import BackfillEngine
 from fulcra_client import FulcraAuthError, get_fulcra_client
 from github_auth import get_github_auth_token, get_token_identity
 from github_spike import GitHubAPISpike
-from narrative import NarrativeGenerator
+from narrative import NarrativeGenerator, NarrativeUploadError
 from notability import NotabilityEngine
 from raw_ingestion import RawActivityIngestor
 from rollups import RollupEngine, attach_raw_evidence
@@ -291,16 +291,22 @@ def handle_narrative(args: argparse.Namespace) -> int:
 
     print(f"\n--- Generating Narrative Document (Range: {args.range}) ---")
     generator = NarrativeGenerator(client=f_client)
-    doc_content, filename, rollups, signals = generator.generate_narrative(
-        github_identity=identity,
-        range_selection=args.range,
-    )
+    try:
+        doc_content, filename, rollups, signals = generator.generate_narrative(
+            github_identity=identity,
+            range_selection=args.range,
+        )
+    except NarrativeUploadError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
 
     out_path = args.output or filename
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(doc_content)
 
     print(f"Successfully generated narrative document: {out_path}")
+    if generator.last_fulcra_path:
+        print(f"Saved automatically to Fulcra: {generator.last_fulcra_path}")
     print(f"Word Count: {len(doc_content.split())} words")
     print(f"Rollup Records Used: {len(rollups)}")
     print(f"Notability Signals Used: {len(signals)}")

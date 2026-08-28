@@ -17,6 +17,7 @@ Markdown narrative generator that prompts for or accepts a target date range (fu
 - [x] Preserves overall requested header bounds across multi-period rendering and uses human-readable month/quarter headings.
 - [x] Starts with durable higher-level trajectory synthesis, keeps counts/record IDs subordinate to the appendix, caps turning points, and compresses unsummarized periods into clearly labelled limited transitions.
 - [x] Includes a side-by-side quality regression over one shared evidence window scoring specificity, chronology, cross-repo synthesis, pacing, repetition, and unsupported claims.
+- [x] Automatically uploads every generated UTF-8 markdown artifact to `/engineering-journeys/<identity>/<writing-year>/` through the Fulcra SDK. Filenames include activity start/end dates and UTC writing date; the CLI prints the path and upload failures are explicit.
 - [x] Has automated tests (pytest) covering the above criteria, and the FULL test suite passes (not just this feature's own tests) — see `app/ENGINEERING_STANDARDS.md`.
 
 ## Dependencies
