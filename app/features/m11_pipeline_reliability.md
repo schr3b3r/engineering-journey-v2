@@ -14,6 +14,8 @@ Retry-safe, observable, stage-resumable execution for the canonical raw-history 
 - [x] Progress JSONL has stable `event`, `stage`, `timestamp`, and `elapsed_seconds` fields plus contextual counts/rate/ETA.
 - [x] GitHub fetch operations emit structured heartbeats; raw ingestion emits bounded record milestones.
 - [x] Final JSONL event contains stage-by-stage timings/counts across resumed invocations.
+- [x] `progress-status` safely collapses empty/partial/heartbeat/retry/backfill/completed streams into concise prose or JSON for agent relay.
+- [x] Skill orchestration caps waits at 15 seconds and requires a user-visible natural-language update between every monitoring tool cycle.
 - [x] Transient DNS/network/429/5xx Fulcra operations use bounded exponential backoff and jitter with retry events.
 - [x] Raw records have deterministic source fingerprints. Ambiguous committed-but-response-lost writes are re-queried before retry and do not duplicate.
 - [x] Coverage/progress, run-state, raw query/write, and final artifact upload paths use retry handling.

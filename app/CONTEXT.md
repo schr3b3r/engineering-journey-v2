@@ -32,6 +32,12 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Agent-facing monitoring is now explicit rather than aspirational:
+`progress-status` turns JSONL into one relay-ready status line, and SKILL.md
+forbids waits over 15 seconds or consecutive monitoring tool batches without a
+natural-language user update. Unchanged counters still produce a heartbeat.
+Tool-feed rows are explicitly not treated as user communication.
+
 Issue #13 reliability now targets the simplified raw-history path: a durable
 `Engineering Journey Run` stores the immutable window, discovered repos, stage,
 and bounded repo milestones. `--resume` reuses that state, skips discovery, and
@@ -98,6 +104,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(post-#13 progress UX correction)** Structured events alone do not inform a user when an agent consumes them silently. `progress-status` provides deterministic summarization, while the skill mandates alternating monitor-tool cycles with actual commentary and caps waits at 15 seconds.
 - **(issue #13 on raw-history architecture)** Reliability is concentrated in four small pieces: `reliability.py` retry classification/backoff, `progress.py` JSONL events/timings, `pipeline_run.py` durable immutable stage state, and raw fingerprint ambiguity checks. Rollup/notability recovery was deliberately not rebuilt because those records are retired from canonical mode.
 - **(issues #14 / post-#12 architecture correction)** Raw Fulcra history is the durable engineering memory; interpretation is ephemeral. The running agent adaptively interprets compact raw evidence with exact record IDs/URLs. Default pipeline does not build derived records or check provider credentials. The publisher stores only the final file artifact. A referenced bootstrap fixes direct Hermes installs without duplicating app code.
 

@@ -29,7 +29,7 @@ from narrative import NarrativeGenerator, NarrativeUploadError
 from notability import NotabilityEngine
 from raw_ingestion import RawActivityIngestor
 from pipeline_run import PipelineRun, PipelineRunManager
-from progress import ProgressReporter
+from progress import ProgressReporter, format_progress_status, progress_snapshot
 from rollups import RollupEngine, attach_raw_evidence
 from summarization import RollupSummarizer
 
@@ -103,6 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--response", required=True, help="Agent-authored response JSON path.")
     publish_parser.add_argument("--output", help="Optional local markdown output path.")
     publish_parser.add_argument("--progress-jsonl", help="Append structured progress to this JSONL path.")
+
+    progress_parser = subparsers.add_parser(
+        "progress-status",
+        help="Summarize progress JSONL into one user-facing status line.",
+    )
+    progress_parser.add_argument("--file", required=True, help="Progress JSONL path.")
+    progress_parser.add_argument(
+        "--json", action="store_true", help="Print snapshot JSON instead of prose."
+    )
 
     # 6. PIPELINE / RUN-ALL command
     pipeline_parser = subparsers.add_parser("pipeline", aliases=["run-all"], help="Execute complete pipeline (backfill -> rollups -> notability -> narrative).")
@@ -733,6 +742,16 @@ def handle_publish_agent_narrative(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_progress_status(args: argparse.Namespace) -> int:
+    """Print one concise snapshot without touching GitHub or Fulcra."""
+    snapshot = progress_snapshot(args.file)
+    if args.json:
+        print(json.dumps(snapshot, sort_keys=True), flush=True)
+    else:
+        print(format_progress_status(snapshot), flush=True)
+    return 0
+
+
 def handle_pipeline(args: argparse.Namespace) -> int:
     """Run durable stages, then hand narration to the selected explicit mode."""
     reporter = _progress_reporter(args)
@@ -860,6 +879,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_agent_handoff(args)
     elif args.command == "publish-agent-narrative":
         return handle_publish_agent_narrative(args)
+    elif args.command == "progress-status":
+        return handle_progress_status(args)
     elif args.command in ("pipeline", "run-all"):
         return handle_pipeline(args)
     else:

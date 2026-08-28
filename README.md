@@ -89,6 +89,17 @@ stage timings. Transient DNS/network/429/5xx failures use bounded exponential
 backoff. Stable raw fingerprints plus post-error re-query make ambiguous write
 retries duplicate-safe.
 
+Agents should not repeatedly parse the raw JSONL. This command produces one
+concise status line ready to relay to the user:
+
+```bash
+$PYTHON cli.py progress-status --file engineering_journey_progress.jsonl
+```
+
+The installed skill requires a user-facing update between every bounded
+monitoring cycle, caps process waits at 15 seconds, and explicitly treats tool
+feed rows as internal activity rather than communication.
+
 To resume, first run without `--yes` to review the durable saved plan, then run
 again after approval:
 
