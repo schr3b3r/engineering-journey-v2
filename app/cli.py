@@ -11,6 +11,11 @@ import os
 import sys
 from typing import List, Optional
 
+from agent_narration import (
+    AgentNarrationValidationError,
+    prepare_agent_handoff,
+    publish_agent_narrative,
+)
 from backfill import BackfillEngine
 from fulcra_client import FulcraAuthError, get_fulcra_client
 from github_auth import (
@@ -74,6 +79,25 @@ def build_parser() -> argparse.ArgumentParser:
     narrative_parser.add_argument("--identity", type=str, help="GitHub username.")
     narrative_parser.add_argument("--output", type=str, help="File path to save output markdown narrative.")
 
+    agent_handoff_parser = subparsers.add_parser(
+        "agent-handoff",
+        help="Prepare grounded narrative context for the LLM already running the skill.",
+    )
+    agent_handoff_parser.add_argument("--identity", required=True, help="GitHub identity.")
+    agent_handoff_parser.add_argument("--range", default="full", help="Narrative range selection.")
+    agent_handoff_parser.add_argument("--since", help="Exact immutable pipeline start timestamp.")
+    agent_handoff_parser.add_argument("--until", help="Exact immutable pipeline end timestamp.")
+    agent_handoff_parser.add_argument("--repo", help="Optional repository filter.")
+    agent_handoff_parser.add_argument("--output", required=True, help="JSON handoff path.")
+
+    publish_parser = subparsers.add_parser(
+        "publish-agent-narrative",
+        help="Validate and publish prose written by the LLM running the skill.",
+    )
+    publish_parser.add_argument("--handoff", required=True, help="Grounded handoff JSON path.")
+    publish_parser.add_argument("--response", required=True, help="Agent-authored response JSON path.")
+    publish_parser.add_argument("--output", help="Optional local markdown output path.")
+
     # 6. PIPELINE / RUN-ALL command
     pipeline_parser = subparsers.add_parser("pipeline", aliases=["run-all"], help="Execute complete pipeline (backfill -> rollups -> notability -> narrative).")
     pipeline_parser.add_argument("--years", type=float, default=1.0, help="Years of history to backfill and report.")
@@ -99,7 +123,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pipeline_parser.add_argument(
         "--provider", type=str, choices=["anthropic", "gemini", "openai"],
-        help="Force a specific provider for real summarization (passed through to scripts/summarize_periods.py).",
+        help="Provider for explicitly selected external narration mode only.",
+    )
+    pipeline_parser.add_argument(
+        "--narration-mode",
+        choices=["agent", "external", "limited"],
+        default="agent",
+        help="Narration source (default: the LLM already running this skill).",
+    )
+    pipeline_parser.add_argument(
+        "--handoff-output",
+        help="Agent-mode JSON handoff path (default: readable range-based filename).",
     )
 
     return parser
@@ -234,8 +268,10 @@ def handle_backfill(args: argparse.Namespace) -> int:
         args, authenticated_identity, identity, since_iso, until_iso
     ):
         return 2
-    # Downstream stages must keep the exact reviewed identity.
+    # Downstream stages must keep the exact reviewed identity and immutable window.
     args.identity = identity
+    args.since = since_iso
+    args.until = until_iso
 
     _emit(f"\n[backfill] Starting for {identity}; progress will continue below.")
     spike = GitHubAPISpike(token=token, progress_callback=_emit)
@@ -409,16 +445,81 @@ def handle_narrative(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_pipeline(args: argparse.Namespace) -> int:
-    """Run complete pipeline end-to-end."""
-    print("============================================================")
-    print(" Engineering Journey v2 — End-to-End Pipeline Execution")
-    print("============================================================")
-    _emit("[pipeline] Checking prerequisites; no activity data has been touched yet.")
+def handle_agent_handoff(args: argparse.Namespace) -> int:
+    """Export durable grounded context for the surrounding running LLM."""
+    try:
+        client = get_fulcra_client()
+    except FulcraAuthError as err:
+        print(f"Error: Fulcra client failed: {err}", file=sys.stderr, flush=True)
+        return 1
+    _emit("[agent narration] Loading durable rollups, signals, and raw evidence...")
+    handoff = prepare_agent_handoff(
+        client=client,
+        github_identity=args.identity,
+        range_selection=getattr(args, "range", "full"),
+        repo=getattr(args, "repo", None),
+        exact_start_time=getattr(args, "since", None),
+        exact_end_time=getattr(args, "until", None),
+    )
+    if not handoff["periods"]:
+        print(
+            "Error: no paced rollup periods were found for this identity/range.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    with open(args.output, "w", encoding="utf-8") as file_handle:
+        json.dump(handoff, file_handle, indent=2, ensure_ascii=False)
+    _emit(
+        f"[agent narration] Handoff ready: {args.output} "
+        f"({len(handoff['periods'])} chronological periods)."
+    )
+    _emit(
+        "[agent narration] The LLM already running this skill must now read "
+        "that JSON, author the response_schema JSON itself, and call "
+        "publish-agent-narrative. No external model credentials are needed."
+    )
+    return 0
 
-    # Fail before a potentially long GitHub/Fulcra run when the requested
-    # quality narrative cannot be generated. Explicit skip is an honest opt-in.
-    if not getattr(args, "skip_real_summarization", False) and not getattr(args, "dry_run", False):
+
+def handle_publish_agent_narrative(args: argparse.Namespace) -> int:
+    """Validate, render, persist, and upload prose authored by the running agent."""
+    try:
+        client = get_fulcra_client()
+    except FulcraAuthError as err:
+        print(f"Error: Fulcra client failed: {err}", file=sys.stderr, flush=True)
+        return 1
+    try:
+        with open(args.handoff, "r", encoding="utf-8") as file_handle:
+            handoff = json.load(file_handle)
+        with open(args.response, "r", encoding="utf-8") as file_handle:
+            response = json.load(file_handle)
+        _emit("[agent narration] Validating period/source completeness...")
+        published = publish_agent_narrative(
+            client, handoff, response, output_path=args.output
+        )
+    except (OSError, json.JSONDecodeError, AgentNarrationValidationError) as err:
+        print(f"Error: agent narrative was not published: {err}", file=sys.stderr, flush=True)
+        return 1
+    _emit(f"[agent narration] Local markdown: {published.markdown_path}")
+    _emit(f"[agent narration] Fulcra file: {published.fulcra_path}")
+    _emit("[agent narration] Grounded narrative validated and published successfully.")
+    return 0
+
+
+def handle_pipeline(args: argparse.Namespace) -> int:
+    """Run durable stages, then hand narration to the selected explicit mode."""
+    _emit("=" * 60)
+    _emit(" Engineering Journey v2 — Guided Pipeline")
+    _emit("=" * 60)
+    narration_mode = (
+        "limited" if getattr(args, "skip_real_summarization", False)
+        else getattr(args, "narration_mode", "agent")
+    )
+    _emit(f"[pipeline] Narration mode: {narration_mode}")
+    _emit("[pipeline] No activity data has been touched yet.")
+
+    if narration_mode == "external" and not getattr(args, "dry_run", False):
         import subprocess
 
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -426,83 +527,78 @@ def handle_pipeline(args: argparse.Namespace) -> int:
         check_cmd = [sys.executable, script_path, "--check-provider"]
         if getattr(args, "provider", None):
             check_cmd += ["--provider", args.provider]
+        _emit("[pipeline] External mode selected; checking its separately configured provider...")
         check = subprocess.run(check_cmd, cwd=repo_root)
         if check.returncode != 0:
             print(
-                "\nError: a quality Engineering Journey requires a configured "
-                "model provider, and none is usable. No backfill was started. "
-                "Configure harness provider credentials, or explicitly pass "
-                "--skip-real-summarization to produce a clearly labelled limited fallback.",
+                "External narration was explicitly selected, but its provider is unavailable. "
+                "Use the default --narration-mode agent to use the LLM already running the skill.",
                 file=sys.stderr,
+                flush=True,
             )
             return check.returncode
 
-    # Step 1: Auth check, plan review & Backfill
-    _emit("\n[pipeline 1/4] Confirming account and activity range, then backfilling.")
-    ret = handle_backfill(args)
-    if ret != 0:
-        return ret
-
+    _emit("\n[pipeline 1/3] Confirming account/range and backfilling durable raw data.")
+    result = handle_backfill(args)
+    if result != 0:
+        return result
     if getattr(args, "dry_run", False):
-        print(
-            "\n[Dry Run] Backfill was a discovery-only dry run; skipping "
-            "rollup/summarize/narrative steps since there is no real "
-            "ingested data yet for them to act on."
-        )
+        _emit("[pipeline] Dry run complete; no derived or narrative stages were run.")
         return 0
 
-    # Step 2: Rollups & Notability
-    _emit("\n[pipeline 2/4] Backfill complete. Building rollups and notability signals.")
-    ret = handle_rollup(args)
-    if ret != 0:
-        return ret
+    _emit("\n[pipeline 2/3] Building rollups and notability signals from the same immutable window.")
+    result = handle_rollup(args)
+    if result != 0:
+        return result
 
-    # Step 3: Real cross-repo period summarization. This is the step
-    # that actually produces engaging, connected narrative prose instead
-    # of a templated one-liner per rollup (see
-    # app/summarization.py's module docstring / GitHub issue #2). It
-    # requires calling a real model, which app/ code is not allowed to
-    # do directly (app/features/m7_rollup_summarization.md: no LLM SDK
-    # dependency in app code) -- so this shells out to the harness-side
-    # driver script as a separate process, keeping that boundary intact.
-    if not getattr(args, "skip_real_summarization", False):
-        _emit("\n[pipeline 3/4] Rollups complete. Starting grounded LLM synthesis.")
-        print("\n--- Generating real cross-repo period summaries (scripts/summarize_periods.py) ---")
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        script_path = os.path.join(repo_root, "scripts", "summarize_periods.py")
-        cmd = [sys.executable, script_path, "--years", str(args.years)]
-        if args.identity:
-            cmd += ["--identity", args.identity]
-        if getattr(args, "since", None):
-            cmd += ["--since", args.since]
-        if getattr(args, "until", None):
-            cmd += ["--until", args.until]
-        if getattr(args, "provider", None):
-            cmd += ["--provider", args.provider]
+    if narration_mode == "agent":
+        _emit("\n[pipeline 3/3] Preparing grounded context for this running agent.")
+        handoff_output = args.handoff_output or (
+            f"engineering_journey_handoff_{args.identity}_{args.since[:10]}_to_{args.until[:10]}.json"
+        )
+        handoff_args = argparse.Namespace(
+            identity=args.identity,
+            range=args.range,
+            since=args.since,
+            until=args.until,
+            repo=args.repo,
+            output=handoff_output,
+        )
+        return handle_agent_handoff(handoff_args)
 
+    if narration_mode == "external":
         import subprocess
 
-        result = subprocess.run(cmd, cwd=repo_root)
-        if result.returncode != 0:
+        _emit("\n[pipeline 3/3] Explicit external-provider synthesis.")
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(repo_root, "scripts", "summarize_periods.py")
+        command = [
+            sys.executable,
+            script_path,
+            "--identity",
+            args.identity,
+            "--since",
+            args.since,
+            "--until",
+            args.until,
+        ]
+        if getattr(args, "provider", None):
+            command += ["--provider", args.provider]
+        external = subprocess.run(command, cwd=repo_root)
+        if external.returncode != 0:
             print(
-                "\nWarning: real summarization step failed or found no "
-                "provider credentials configured (see output above). "
-                "Continuing to narrative generation -- it will fall back "
-                "to templated per-repo summaries for any period that "
-                "didn't get a real one written back.",
+                "External synthesis failed; refusing to disguise fallback output as a quality narrative.",
                 file=sys.stderr,
+                flush=True,
             )
+            return external.returncode
     else:
-        print(
-            "\n--skip-real-summarization set: skipping real cross-repo "
-            "summarization. The narrative will use templated per-repo "
-            "summaries instead of connected prose."
+        _emit(
+            "\n[pipeline 3/3] Explicit limited mode selected; output will be clearly labelled non-LLM fallback."
         )
 
-    # Step 4: Narrative Generation
-    _emit("\n[pipeline 4/4] Writing the narrative and uploading it to Fulcra.")
-    ret = handle_narrative(args)
-    return ret
+    args.range = f"{args.since[:10]} to {args.until[:10]}"
+    return handle_narrative(args)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -524,6 +620,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_summarize(args)
     elif args.command == "narrative":
         return handle_narrative(args)
+    elif args.command == "agent-handoff":
+        return handle_agent_handoff(args)
+    elif args.command == "publish-agent-narrative":
+        return handle_publish_agent_narrative(args)
     elif args.command in ("pipeline", "run-all"):
         return handle_pipeline(args)
     else:

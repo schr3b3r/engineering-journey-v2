@@ -52,6 +52,16 @@ def test_build_parser():
     assert args_nar.range == "1y"
     assert args_nar.output == "custom.md"
 
+    args_handoff = parser.parse_args([
+        "agent-handoff", "--identity", "octocat", "--output", "handoff.json",
+    ])
+    assert args_handoff.command == "agent-handoff"
+    args_publish = parser.parse_args([
+        "publish-agent-narrative", "--handoff", "handoff.json",
+        "--response", "response.json",
+    ])
+    assert args_publish.command == "publish-agent-narrative"
+
 
 def test_detect_existing_github_auth_env(monkeypatch):
     """Test detecting existing GitHub token from environment variables."""
@@ -363,10 +373,10 @@ def test_cli_pipeline_dry_run_skips_rollup_summarize_narrative(monkeypatch):
                         mock_narrative.assert_not_called()
 
 
-def test_pipeline_provider_preflight_fails_before_backfill(capsys):
-    """Issue #7: missing model credentials must not be discovered after a long run."""
+def test_external_pipeline_provider_preflight_fails_before_backfill(capsys):
+    """External mode still fails before a long run when its separate provider is absent."""
     args = build_parser().parse_args([
-        "pipeline", "--identity", "octocat", "--yes",
+        "pipeline", "--identity", "octocat", "--yes", "--narration-mode", "external",
     ])
     failed_check = MagicMock(returncode=2)
     with patch("subprocess.run", return_value=failed_check) as run_check:
@@ -374,4 +384,25 @@ def test_pipeline_provider_preflight_fails_before_backfill(capsys):
             assert handle_pipeline(args) == 2
     backfill.assert_not_called()
     assert "--check-provider" in run_check.call_args.args[0]
-    assert "No backfill was started" in capsys.readouterr().err
+    assert "default --narration-mode agent" in capsys.readouterr().err
+
+
+def test_default_agent_pipeline_never_checks_external_provider() -> None:
+    args = build_parser().parse_args([
+        "pipeline", "--identity", "octocat", "--yes",
+        "--since", "2025-01-01T00:00:00Z", "--until", "2025-02-01T00:00:00Z",
+    ])
+
+    def completed_backfill(namespace):
+        namespace.identity = "octocat"
+        namespace.since = "2025-01-01T00:00:00Z"
+        namespace.until = "2025-02-01T00:00:00Z"
+        return 0
+
+    with patch("cli.handle_backfill", side_effect=completed_backfill):
+        with patch("cli.handle_rollup", return_value=0):
+            with patch("cli.handle_agent_handoff", return_value=0) as handoff:
+                with patch("subprocess.run") as external_provider:
+                    assert handle_pipeline(args) == 0
+    external_provider.assert_not_called()
+    handoff.assert_called_once()
