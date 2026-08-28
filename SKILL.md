@@ -213,7 +213,7 @@ with open(filename, "w") as f:
 
 ## 4. Architecture & Data Layers in Fulcra
 
-1. **GitHub Backfill Checkpoint** (`DurationAnnotation`): Durable per-repo/identity progress markers tracking completed date windows.
+1. **GitHub Backfill Coverage** (`DurationAnnotation`): Durable completed per-repo/identity source-time windows; **GitHub Backfill Progress** (`MomentAnnotation`) stores bounded operational cursor milestones at update time.
 2. **GitHub Activity Raw** (`MomentAnnotation`): Uniform daily granularity records for raw activity items (`commit`, `pr_open`, `pr_merge`, `pr_review`, `issue_comment`, `pr_comment`). Real event time as `recorded_at`.
 3. **Activity Rollup** (`DurationAnnotation`): Precomputed counts across Day, Week, Month, Quarter, Year periods with provenance chains (`sources`).
 4. **Notability Signal** (`NumericAnnotation`): Statistical eventfulness scores (`value`) with z-scores, volume ratios, and narrative explanations (`note`).

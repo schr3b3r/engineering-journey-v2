@@ -9,7 +9,12 @@ from dataclasses import dataclass, field
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from checkpoint import Checkpoint, CheckpointManager, format_tag
+from checkpoint import (
+    DEFAULT_PROGRESS_INTERVAL,
+    Checkpoint,
+    CheckpointManager,
+    format_tag,
+)
 from github_spike import GitHubActivityItem
 
 RAW_ACTIVITY_ANNOTATION_NAME = "GitHub Activity Raw"
@@ -61,9 +66,12 @@ def activity_item_from_record(record: Dict[str, Any]) -> GitHubActivityItem:
 class RawActivityIngestor:
     """Ingests raw GitHub activity items into Fulcra with durable checkpointing."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(
+        self, client: Any, progress_interval: int = DEFAULT_PROGRESS_INTERVAL
+    ) -> None:
         self.client = client
         self.checkpoint_manager = CheckpointManager(client)
+        self.progress_interval = max(1, progress_interval)
         self._type_info: Optional[Dict[str, Any]] = None
         self._tag_cache: Dict[str, str] = {}
 
@@ -164,22 +172,36 @@ class RawActivityIngestor:
             # checkpoint for this specific range rather than as "done."
             latest_cp = None
 
-        last_cursor = latest_cp.cursor if latest_cp else None
-        remaining_items = items
+        # Raw records are the idempotency authority between bounded progress
+        # milestones. If a process dies after writing raw data but before the
+        # next progress moment, replay sees and skips those durable item IDs.
+        existing_items = self.get_raw_activities(
+            repo=repo,
+            github_identity=github_identity,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        existing_ids = {str(item.item_id) for item in existing_items if item.item_id}
 
+        last_cursor = latest_cp.cursor if latest_cp and latest_cp.status != "completed" else None
+        start_idx = 0
         if last_cursor is not None:
-            start_idx = len(items)
-            for idx, item in enumerate(items):
-                if str(item.item_id) == str(last_cursor):
-                    start_idx = idx + 1
-                    break
-            remaining_items = items[start_idx:]
-
+            start_idx = next(
+                (idx + 1 for idx, item in enumerate(items) if str(item.item_id) == str(last_cursor)),
+                0,
+            )
+        remaining_items = items[start_idx:]
         newly_processed = 0
+        examined = 0
+        last_examined: Optional[GitHubActivityItem] = None
 
         for item in remaining_items:
             if kill_after_n is not None and newly_processed >= kill_after_n:
                 break
+            examined += 1
+            last_examined = item
+            if str(item.item_id) in existing_ids:
+                continue
 
             # Build item tags
             tag_names = [
@@ -209,30 +231,43 @@ class RawActivityIngestor:
 
             processed_log.append(item)
             newly_processed += 1
+            existing_ids.add(str(item.item_id))
 
-            prev_items = latest_cp.items_processed if latest_cp else 0
-            cp = Checkpoint(
+            if newly_processed % self.progress_interval == 0:
+                latest_cp = Checkpoint(
+                    repo=repo,
+                    github_identity=github_identity,
+                    start_time=start_time,
+                    end_time=end_time,
+                    status="in_progress",
+                    cursor=item.item_id,
+                    items_processed=len(existing_ids),
+                )
+                self.checkpoint_manager.save_checkpoint(latest_cp)
+
+        interrupted = kill_after_n is not None and examined < len(remaining_items)
+        if interrupted and last_examined is not None:
+            # Graceful shutdown gets a final bounded progress moment. A hard
+            # kill relies on existing_ids replay protection instead.
+            latest_cp = Checkpoint(
                 repo=repo,
                 github_identity=github_identity,
                 start_time=start_time,
                 end_time=end_time,
                 status="in_progress",
-                cursor=item.item_id,
-                items_processed=prev_items + 1,
+                cursor=last_examined.item_id,
+                items_processed=len(existing_ids),
             )
-            self.checkpoint_manager.save_checkpoint(cp)
-            latest_cp = cp
-
-        if remaining_items and newly_processed == len(remaining_items):
-            prev_items = latest_cp.items_processed if latest_cp else len(items)
+            self.checkpoint_manager.save_checkpoint(latest_cp)
+        elif all(str(item.item_id) in existing_ids for item in items):
             cp = Checkpoint(
                 repo=repo,
                 github_identity=github_identity,
                 start_time=start_time,
                 end_time=end_time,
                 status="completed",
-                cursor=remaining_items[-1].item_id if remaining_items else None,
-                items_processed=prev_items,
+                cursor=items[-1].item_id if items else None,
+                items_processed=len(existing_ids),
             )
             self.checkpoint_manager.save_checkpoint(cp)
             latest_cp = cp

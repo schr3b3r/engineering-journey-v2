@@ -135,6 +135,23 @@ def test_backfill_engine_multi_repo(mock_fulcra_client) -> None:
     r3_items = ingestor.get_raw_activities(repo=repo3, github_identity=identity, start_time=start_time, end_time=end_time)
     assert len(r3_items) == 1
 
+    # Empty repositories still receive one semantically meaningful completed
+    # coverage duration, so future runs skip their precheck.
+    empty_coverage = [
+        Checkpoint.from_record(record, "coverage")
+        for record in mock_fulcra_client.duration_records
+        if repo2 in (record.get("note") or "")
+    ]
+    assert len(empty_coverage) == 1
+    assert empty_coverage[0].status == "completed"
+    assert empty_coverage[0].items_processed == 0
+    assert mock_fulcra_client.duration_records[
+        next(
+            index for index, record in enumerate(mock_fulcra_client.duration_records)
+            if repo2 in (record.get("note") or "")
+        )
+    ]["recorded_at"] == {"start_time": start_time, "end_time": end_time}
+
 
 def test_multi_repo_kill_and_resume(mock_fulcra_client) -> None:
     """Verify real multi-repo kill-mid-backfill and resume from a fresh session/process without duplicating items."""

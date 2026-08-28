@@ -1,0 +1,9 @@
+Address GitHub issue #9: redesign checkpoint persistence to use Fulcra temporal semantics cleanly.
+
+Read ENGINEERING_STANDARDS.md, CONTEXT.md, feature specs, checkpoint.py, raw_ingestion.py, backfill.py, and tests first.
+
+Separate completed coverage from operational progress. Completed coverage should be a DurationAnnotation whose recorded_at is the actual covered GitHub window. In-progress state, if retained, should be a MomentAnnotation at its actual update time. Bound progress writes by a configurable milestone rather than writing once per raw item. Preserve exact kill/resume behavior by making raw ingestion idempotent across replay (no skipped or duplicated raw items), including crashes between progress milestones. Keep zero-activity completed coverage and backward/forward gap calculations correct. New readers must remain compatible with legacy GitHub Backfill Checkpoint records without creating more legacy records.
+
+Add an explicit migration/cleanup plan for existing legacy records. Planning must be non-destructive; deletion/supersession of owner data must require a separately confirmed action and must not happen automatically.
+
+Add tests that inspect underlying Fulcra duration and moment records—not only reconstructed Checkpoint objects—and assert temporal shape, bounded count, completed/progress separation, zero-activity coverage, kill/resume correctness, extension behavior, and legacy compatibility. Include a live integration test gated by RUN_LIVE_TESTS that inspects actual records when credentials are present. Run the full app test suite, update feature docs/CONTEXT, and commit app changes through the harness git_commit gate.

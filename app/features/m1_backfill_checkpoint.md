@@ -1,21 +1,27 @@
-# Feature: M1 Backfill Checkpoint
+# Feature: M1 Backfill Coverage and Progress
 
 ## Status
 done
 
 ## Description
-Implements the "GitHub Backfill Checkpoint" Fulcra record type (`DurationAnnotation` base per `architecture.md`) and functions to record, query, and verify backfill progress. Supports interruptible and resumable backfills across per-repo tag-based tracking dimensions, avoiding reprocessing or skipping work items.
+Durable, resumable GitHub backfill state using Fulcra's temporal model: completed source-time windows are `GitHub Backfill Coverage` duration records, while bounded operational cursor milestones are `GitHub Backfill Progress` moment records at actual update time.
 
 ## Acceptance Criteria
-- [x] Custom data type "GitHub Backfill Checkpoint" (`DurationAnnotation` base) is ensured/registered in Fulcra with schema matching `architecture.md`.
-- [x] Checkpoint records store `{start_time, end_time}` range in `recorded_at`, tags for `repo:<owner/repo>`, `github_identity:<user>`, `status:<in_progress|completed>`, and `github_backfill_checkpoint`, and JSON `note` containing metadata, cursor, and `updated_at`.
-- [x] A kill-mid-process/restart-from-fresh-process simulation against fake work items proves correct resume (no reprocessing, no skipped items).
-- [x] Per-repo tag-based tracking design is exercised with multiple fake repo names, verifying that progress in one repo does not interfere with another and that range coverage queries (`is_range_covered`) work as expected.
-- [x] Has automated tests (pytest) covering the above criteria, and the FULL test suite passes (not just this feature's own tests) — see `app/ENGINEERING_STANDARDS.md`.
+- [x] Completed repository/subrange coverage is a `DurationAnnotation` whose `recorded_at` is exactly the GitHub source window.
+- [x] In-progress state is a `MomentAnnotation` at actual update time, clearly separated from completed coverage.
+- [x] Progress writes occur at a configurable bounded milestone (default 100 raw writes), not once per item.
+- [x] Raw-record replay is idempotent, preserving no-skip/no-duplicate kill and hard-crash recovery between milestones.
+- [x] Zero-activity completed coverage remains durable and avoids repeated prechecks.
+- [x] Per-repository isolation, backward/forward extension, and coverage-gap calculation remain correct.
+- [x] Readers support legacy `GitHub Backfill Checkpoint` records but never create new legacy records.
+- [x] `plan_legacy_cleanup()` provides a non-destructive inventory; `checkpoint_migration.md` requires separate owner confirmation for deletion.
+- [x] Unit tests inspect underlying duration/moment records and record counts; a `RUN_LIVE_TESTS=1` integration test inspects real Fulcra temporal shape.
+- [x] The full pytest suite passes—see `app/ENGINEERING_STANDARDS.md`.
 
 ## Dependencies
 none
 
 ## Notes
-- Built for Milestone 1 as part of the resumability foundation.
-- Uses `fulcra-api` Python SDK.
+- `GitHub Backfill Coverage` uses tag `github_backfill_coverage`.
+- `GitHub Backfill Progress` uses tag `github_backfill_progress`.
+- The raw records themselves are the idempotency authority if a process dies after a raw write but before its next progress milestone.
