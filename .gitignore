@@ -19,6 +19,7 @@ app/**/__pycache__/
 # CLI runtime output (summarize/narrative command defaults)
 app/summarization_handoff.json
 app/engineering_journey_*.md
+app/engineering_journey_*.jsonl
 summarization_handoff.json
 
 # OS

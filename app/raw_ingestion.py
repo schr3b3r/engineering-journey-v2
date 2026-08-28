@@ -6,6 +6,7 @@ wired into M1's Checkpoint mechanism for resumability.
 """
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -17,11 +18,26 @@ from checkpoint import (
     format_tag,
 )
 from github_spike import GitHubActivityItem
+from reliability import retry_call
 
 RAW_ACTIVITY_ANNOTATION_NAME = "GitHub Activity Raw"
 RAW_ACTIVITY_ANNOTATION_TYPE = "moment"
 RAW_ACTIVITY_DESCRIPTION = "Raw GitHub activity item"
 RAW_ACTIVITY_TAG = "github_activity_raw"
+
+
+def activity_fingerprint(item: GitHubActivityItem) -> str:
+    """Stable source identity used to make partial retries ambiguity-safe."""
+    value = "|".join(
+        (
+            item.github_identity,
+            item.repo,
+            item.activity_type,
+            str(item.item_id),
+            item.event_timestamp,
+        )
+    )
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def activity_item_to_note_dict(item: GitHubActivityItem) -> Dict[str, Any]:
@@ -35,6 +51,7 @@ def activity_item_to_note_dict(item: GitHubActivityItem) -> Dict[str, Any]:
         "title_or_summary": item.title_or_summary,
         "url": item.url,
         "raw_payload": item.raw_payload,
+        "fingerprint": activity_fingerprint(item),
     }
 
 
@@ -73,45 +90,62 @@ class RawActivityIngestor:
         client: Any,
         progress_interval: int = DEFAULT_PROGRESS_INTERVAL,
         progress_callback: Optional[Callable[[str], None]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.client = client
-        self.checkpoint_manager = CheckpointManager(client)
+        self.checkpoint_manager = CheckpointManager(client, event_callback=event_callback)
         self.progress_interval = max(1, progress_interval)
         self.progress_callback = progress_callback
+        self.event_callback = event_callback
         self._type_info: Optional[Dict[str, Any]] = None
         self._tag_cache: Dict[str, str] = {}
+
+    def _retry_event(self, event: Dict[str, Any]) -> None:
+        event["stage"] = "raw_ingestion"
+        if self.event_callback:
+            self.event_callback(event)
+        if self.progress_callback:
+            self.progress_callback(
+                f"[retry] {event['operation']}: attempt {event['attempt']}/"
+                f"{event['max_attempts']} in {event['delay_seconds']}s ({event['error']})"
+            )
 
     def ensure_data_type(self) -> Dict[str, Any]:
         """Ensure the 'GitHub Activity Raw' custom annotation type exists in Fulcra."""
         if self._type_info:
             return self._type_info
 
-        try:
+        def operation() -> Dict[str, Any]:
             catalog = self.client.annotations_catalog()
             for ann in catalog:
                 if (
                     ann.get("deleted_at") is None
                     and ann.get("name") == RAW_ACTIVITY_ANNOTATION_NAME
                 ):
-                    self._type_info = ann
                     return ann
-        except Exception:
-            pass
+            return self.client.create_annotation(
+                annotation_type=RAW_ACTIVITY_ANNOTATION_TYPE,
+                name=RAW_ACTIVITY_ANNOTATION_NAME,
+                description=RAW_ACTIVITY_DESCRIPTION,
+                tags=[],
+            )
 
-        created = self.client.create_annotation(
-            annotation_type=RAW_ACTIVITY_ANNOTATION_TYPE,
-            name=RAW_ACTIVITY_ANNOTATION_NAME,
-            description=RAW_ACTIVITY_DESCRIPTION,
-            tags=[],
+        self._type_info = retry_call(
+            operation,
+            operation_name="ensure raw activity type",
+            on_retry=self._retry_event,
         )
-        self._type_info = created
-        return created
+        return self._type_info
 
     def _resolve_tag_ids(self, tag_names: List[str]) -> List[str]:
         """Resolve tag names to tag UUIDs using local cache and client.create_tags."""
         missing = [t for t in tag_names if t not in self._tag_cache]
         if missing:
-            resolved = self.client.create_tags(missing)
+            resolved = retry_call(
+                lambda: self.client.create_tags(missing),
+                operation_name="resolve raw activity tags",
+                on_retry=self._retry_event,
+            )
             for item in resolved:
                 name = item.get("name")
                 tag_id = item.get("id")
@@ -187,7 +221,7 @@ class RawActivityIngestor:
             start_time=start_time,
             end_time=end_time,
         )
-        existing_ids = {str(item.item_id) for item in existing_items if item.item_id}
+        existing_fingerprints = {activity_fingerprint(item) for item in existing_items}
 
         last_cursor = latest_cp.cursor if latest_cp and latest_cp.status != "completed" else None
         start_idx = 0
@@ -207,7 +241,8 @@ class RawActivityIngestor:
                 break
             examined += 1
             last_examined = item
-            if str(item.item_id) in existing_ids:
+            fingerprint = activity_fingerprint(item)
+            if fingerprint in existing_fingerprints:
                 continue
 
             # Build item tags
@@ -231,25 +266,58 @@ class RawActivityIngestor:
                 "note": json.dumps(activity_item_to_note_dict(item)),
             }
 
-            # Record to Fulcra
-            self.client.record_data_type(
-                "MomentAnnotation", [record], api_version="v1alpha1"
+            # If a write commits but its response is lost, query by stable
+            # fingerprint before retrying so the retry cannot duplicate it.
+            def write_record() -> Any:
+                try:
+                    return self.client.record_data_type(
+                        "MomentAnnotation", [record], api_version="v1alpha1"
+                    )
+                except Exception:
+                    durable = self.get_raw_activities(
+                        repo=item.repo,
+                        github_identity=item.github_identity,
+                        start_time=start_time,
+                        end_time=end_time,
+                    )
+                    if fingerprint in {activity_fingerprint(value) for value in durable}:
+                        return {"recovered_after_ambiguous_write": True}
+                    raise
+
+            retry_call(
+                write_record,
+                operation_name=f"write raw activity {fingerprint[:12]}",
+                on_retry=self._retry_event,
             )
 
             processed_log.append(item)
             newly_processed += 1
-            existing_ids.add(str(item.item_id))
+            existing_fingerprints.add(fingerprint)
 
             now = time.perf_counter()
-            if self.progress_callback and (
+            should_report = (
                 newly_processed == 1
                 or newly_processed % 25 == 0
                 or (now - last_progress_at) >= 10
-            ):
+            )
+            if should_report and self.progress_callback:
                 self.progress_callback(
                     f"[ingest] {repo}: {newly_processed} new / "
                     f"{len(remaining_items)} considered; latest {item.activity_type}."
                 )
+            if should_report and self.event_callback:
+                self.event_callback(
+                    {
+                        "event": "progress",
+                        "stage": "ingest",
+                        "repository": repo,
+                        "records_written": newly_processed,
+                        "items_considered": examined,
+                        "items_total": len(remaining_items),
+                        "latest_activity_type": item.activity_type,
+                    }
+                )
+            if should_report:
                 last_progress_at = now
 
             if newly_processed % self.progress_interval == 0:
@@ -260,7 +328,7 @@ class RawActivityIngestor:
                     end_time=end_time,
                     status="in_progress",
                     cursor=item.item_id,
-                    items_processed=len(existing_ids),
+                    items_processed=len(existing_fingerprints),
                 )
                 self.checkpoint_manager.save_checkpoint(latest_cp)
 
@@ -275,10 +343,10 @@ class RawActivityIngestor:
                 end_time=end_time,
                 status="in_progress",
                 cursor=last_examined.item_id,
-                items_processed=len(existing_ids),
+                items_processed=len(existing_fingerprints),
             )
             self.checkpoint_manager.save_checkpoint(latest_cp)
-        elif all(str(item.item_id) in existing_ids for item in items):
+        elif all(activity_fingerprint(item) in existing_fingerprints for item in items):
             cp = Checkpoint(
                 repo=repo,
                 github_identity=github_identity,
@@ -286,7 +354,7 @@ class RawActivityIngestor:
                 end_time=end_time,
                 status="completed",
                 cursor=items[-1].item_id if items else None,
-                items_processed=len(existing_ids),
+                items_processed=len(existing_fingerprints),
             )
             self.checkpoint_manager.save_checkpoint(cp)
             latest_cp = cp
@@ -295,6 +363,16 @@ class RawActivityIngestor:
             status = latest_cp.status if latest_cp else "no-op"
             self.progress_callback(
                 f"[ingest] {repo}: finished with {newly_processed} new records; status={status}."
+            )
+        if self.event_callback:
+            self.event_callback(
+                {
+                    "event": "repository_ingest_completed",
+                    "stage": "ingest",
+                    "repository": repo,
+                    "records_written": newly_processed,
+                    "status": latest_cp.status if latest_cp else "no-op",
+                }
             )
 
         return newly_processed, latest_cp
@@ -320,16 +398,20 @@ class RawActivityIngestor:
                 format_tag(f"activity_type:{activity_type}")
             )
 
-        resolved = self.client.create_tags(required_tag_names)
-        required_tag_ids = set(t["id"] for t in resolved)
-
-        records = self.client.moment_annotations(
-            start_time=start_time, end_time=end_time
-        )
-        items: List[GitHubActivityItem] = []
-
+        required_tag_ids = set(self._resolve_tag_ids(required_tag_names))
         type_info = self.ensure_data_type()
         target_type_id = type_info.get("id", "")
+        type_source_id = type_info.get("fulcra_source_id") or (
+            f"com.fulcradynamics.annotation.{target_type_id}"
+        )
+        records = retry_call(
+            lambda: self.client.moment_annotations(
+                start_time=start_time, end_time=end_time, source=type_source_id
+            ),
+            operation_name="query raw activity",
+            on_retry=self._retry_event,
+        )
+        items: List[GitHubActivityItem] = []
 
         for rec in records:
             # Match by tag UUID set or metadata annotation name

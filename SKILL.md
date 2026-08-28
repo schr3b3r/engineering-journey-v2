@@ -73,7 +73,8 @@ Never infer approval or start with `--yes`.
 After approval:
 
 ```bash
-$PYTHON cli.py pipeline --years 1.0 --yes
+$PYTHON cli.py pipeline --years 1.0 --yes \
+  --progress-jsonl engineering_journey_progress.jsonl
 ```
 
 Agent narration is the default. This command completes any missing raw-history
@@ -84,6 +85,13 @@ It does not build persisted derived interpretation or invoke an external model.
 Run long commands with streaming output, or as a managed background process
 that is polled frequently. Relay repository, record, stage, retry, and elapsed
 updates to the user. Never leave a long tool call silent.
+
+The JSONL file is the reliable relay surface for agent/background execution.
+Poll it while the process runs. Every event includes `event`, `stage`,
+`timestamp`, and `elapsed_seconds`; backfill events add repository counts,
+records written, rate, and ETA. GitHub calls emit heartbeats, Fulcra retries
+emit attempt/delay/error details, and the final event contains stage-by-stage
+timings and counts.
 
 ### 3. Write the narrative with this running LLM
 
@@ -154,6 +162,33 @@ out-of-order sections, and missing/duplicate/unknown raw IDs. On success it:
 Report both printed paths to the user and briefly summarize what was produced.
 
 ## Resume and rewriting
+
+### Resume interrupted preparation
+
+First display the durable resume plan without approving it:
+
+```bash
+$PYTHON cli.py pipeline --resume --identity <github-user> \
+  --progress-jsonl engineering_journey_progress.jsonl
+```
+
+The CLI finds the latest incomplete `Engineering Journey Run`, restores its
+exact identity/window/repository scope, and shows the saved stage and progress.
+After the user approves that resume plan:
+
+```bash
+$PYTHON cli.py pipeline --resume --identity <github-user> --yes \
+  --progress-jsonl engineering_journey_progress.jsonl
+```
+
+Resume reuses the durable repository list instead of rediscovering it. If raw
+history is already complete, it performs no GitHub discovery, coverage checks,
+or fetches and proceeds directly to a fresh handoff. Transient Fulcra
+DNS/network/429/5xx failures are retried with bounded exponential backoff and
+jitter. Raw writes use stable fingerprints and re-query after ambiguous errors
+before retrying, preventing committed-but-response-lost duplicates.
+
+### Rewrite from existing raw history
 
 The handoff reads durable Fulcra records. Rewriting the narrative does not
 require another GitHub fetch. If data preparation already completed, run:

@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from reliability import retry_call
 
 LEGACY_CHECKPOINT_ANNOTATION_NAME = "GitHub Backfill Checkpoint"
 LEGACY_CHECKPOINT_TAG = "github_backfill_checkpoint"
@@ -117,26 +119,43 @@ class Checkpoint:
 class CheckpointManager:
     """Writes semantically distinct coverage durations and progress moments."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(
+        self,
+        client: Any,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
         self.client = client
+        self.event_callback = event_callback
         self._type_info: Dict[str, Dict[str, Any]] = {}
 
+    def _retry_event(self, event: Dict[str, Any]) -> None:
+        event["stage"] = "checkpoint"
+        if self.event_callback:
+            self.event_callback(event)
+
     def _catalog_type(self, name: str) -> Optional[Dict[str, Any]]:
-        try:
-            return next(
-                (ann for ann in self.client.annotations_catalog()
-                 if ann.get("deleted_at") is None and ann.get("name") == name),
-                None,
-            )
-        except Exception:
-            return None
+        return next(
+            (ann for ann in self.client.annotations_catalog()
+             if ann.get("deleted_at") is None and ann.get("name") == name),
+            None,
+        )
 
     def _ensure_type(self, name: str, annotation_type: str, description: str) -> Dict[str, Any]:
         if name in self._type_info:
             return self._type_info[name]
-        existing = self._catalog_type(name)
-        info = existing or self.client.create_annotation(
-            annotation_type=annotation_type, name=name, description=description, tags=[]
+        def operation() -> Dict[str, Any]:
+            existing = self._catalog_type(name)
+            return existing or self.client.create_annotation(
+                annotation_type=annotation_type,
+                name=name,
+                description=description,
+                tags=[],
+            )
+
+        info = retry_call(
+            operation,
+            operation_name=f"ensure checkpoint type {name}",
+            on_retry=self._retry_event,
         )
         self._type_info[name] = info
         return info
@@ -174,14 +193,42 @@ class CheckpointManager:
             format_tag(f"github_identity:{checkpoint.github_identity}"),
             format_tag(f"status:{checkpoint.status}"),
         ]
-        tag_ids = [tag_info["id"] for tag_info in self.client.create_tags(tag_names)]
-        record = {
-            "recorded_at": recorded_at,
-            "tags": tag_ids,
-            "sources": [self._source_id(info), "com.fulcradynamics.cli"],
-            "note": checkpoint.to_note_json(),
-        }
-        response = self.client.record_data_type(data_type, [record], api_version="v1alpha1")
+        def operation() -> Dict[str, Any]:
+            try:
+                tag_ids = [
+                    tag_info["id"] for tag_info in self.client.create_tags(tag_names)
+                ]
+                record = {
+                    "recorded_at": recorded_at,
+                    "tags": tag_ids,
+                    "sources": [self._source_id(info), "com.fulcradynamics.cli"],
+                    "note": checkpoint.to_note_json(),
+                }
+                return self.client.record_data_type(
+                    data_type, [record], api_version="v1alpha1"
+                )
+            except Exception:
+                visible = self.get_checkpoints(
+                    checkpoint.repo,
+                    checkpoint.github_identity,
+                    checkpoint.start_time,
+                    checkpoint.end_time,
+                )
+                if any(
+                    value.start_time == checkpoint.start_time
+                    and value.end_time == checkpoint.end_time
+                    and value.status == checkpoint.status
+                    and value.cursor == checkpoint.cursor
+                    for value in visible
+                ):
+                    return {"recovered_after_ambiguous_write": True}
+                raise
+
+        response = retry_call(
+            operation,
+            operation_name=f"save {checkpoint.record_kind} checkpoint",
+            on_retry=self._retry_event,
+        )
         if completed:
             self._wait_for_checkpoint_visible(checkpoint)
         return response
@@ -193,12 +240,24 @@ class CheckpointManager:
             return []
         source_id = self._source_id(info)
         if kind == "progress":
-            records = self.client.moment_annotations(
-                start_time="2000-01-01T00:00:00Z", end_time="2100-01-01T00:00:00Z", source=source_id
+            records = retry_call(
+                lambda: self.client.moment_annotations(
+                    start_time="2000-01-01T00:00:00Z",
+                    end_time="2100-01-01T00:00:00Z",
+                    source=source_id,
+                ),
+                operation_name="query progress checkpoints",
+                on_retry=self._retry_event,
             )
         else:
-            records = self.client.duration_annotations(
-                start_time="2000-01-01T00:00:00Z", end_time="2100-01-01T00:00:00Z", source=source_id
+            records = retry_call(
+                lambda: self.client.duration_annotations(
+                    start_time="2000-01-01T00:00:00Z",
+                    end_time="2100-01-01T00:00:00Z",
+                    source=source_id,
+                ),
+                operation_name="query coverage checkpoints",
+                on_retry=self._retry_event,
             )
         return [Checkpoint.from_record(record, record_kind=kind) for record in records]
 

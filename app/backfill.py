@@ -49,13 +49,19 @@ class BackfillEngine:
         fulcra_client: Any,
         github_api: GitHubAPISpike,
         progress_callback: Optional[Callable[[str], None]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.fulcra_client = fulcra_client
         self.github_api = github_api
-        self.checkpoint_manager = CheckpointManager(fulcra_client)
+        self.checkpoint_manager = CheckpointManager(
+            fulcra_client, event_callback=event_callback
+        )
         self.progress_callback = progress_callback or (lambda message: print(message, flush=True))
+        self.event_callback = event_callback
         self.raw_ingestor = RawActivityIngestor(
-            fulcra_client, progress_callback=self.progress_callback
+            fulcra_client,
+            progress_callback=self.progress_callback,
+            event_callback=event_callback,
         )
 
     def run_backfill(
@@ -65,6 +71,8 @@ class BackfillEngine:
         end_time: str,
         repos: Optional[List[str]] = None,
         kill_after_n_records: Optional[int] = None,
+        repo_offset: int = 0,
+        repos_total_override: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Run backfill for `github_identity` across specified date range and repos.
 
@@ -89,7 +97,7 @@ class BackfillEngine:
             repos = self.github_api.discover_user_repos(github_identity)
         self.progress_callback(f"[backfill] Discovered {len(repos)} repositories. Processing...")
 
-        repos_total = len(repos)
+        repos_total = repos_total_override or len(repos)
         repos_covered: List[str] = []
         repos_no_activity: List[str] = []
         repos_active: List[str] = []
@@ -97,12 +105,14 @@ class BackfillEngine:
         total_records_ingested = 0
         remaining_kill_budget = kill_after_n_records
         interrupted = False
+        last_started_repo_index = repo_offset
 
 
         # Step 2: Process each repo
-        for repo_index, repo in enumerate(repos, start=1):
+        for repo_index, repo in enumerate(repos, start=repo_offset + 1):
             if interrupted:
                 break
+            last_started_repo_index = repo_index
 
             # Every repository gets a contextual state line. This is
             # intentionally more conversational than a sparse heartbeat: a
@@ -111,6 +121,24 @@ class BackfillEngine:
                 f"[backfill {repo_index}/{repos_total}] {repo}: checking existing coverage "
                 f"({len(repos_active)} active repos, {total_records_ingested} records written)."
             )
+            if self.event_callback:
+                elapsed = max(time.perf_counter() - start_wall_time, 0.001)
+                completed_count = repo_index - 1
+                rate = completed_count / elapsed
+                eta = (repos_total - completed_count) / rate if rate > 0 else None
+                self.event_callback(
+                    {
+                        "event": "progress",
+                        "stage": "backfill",
+                        "repos_completed": completed_count,
+                        "repos_total": repos_total,
+                        "active_repos": len(repos_active),
+                        "records_written": total_records_ingested,
+                        "rate_repos_per_second": round(rate, 4),
+                        "eta_seconds": round(eta, 1) if eta is not None else None,
+                        "current_repository": repo,
+                    }
+                )
 
 
             # 2a: Calculate sub-ranges not yet covered by completed checkpoints
@@ -205,7 +233,7 @@ class BackfillEngine:
         elapsed_wall_time = time.perf_counter() - start_wall_time
         total_api_calls = self.github_api.api_call_count - start_api_calls
 
-        return {
+        result = {
             "github_identity": github_identity,
             "start_time": start_time,
             "end_time": end_time,
@@ -218,3 +246,23 @@ class BackfillEngine:
             "api_calls_made": total_api_calls,
             "interrupted": interrupted,
         }
+        if self.event_callback:
+            completed_repos = (
+                max(repo_offset, last_started_repo_index - 1)
+                if interrupted
+                else min(repo_offset + len(repos), repos_total)
+            )
+            self.event_callback(
+                {
+                    "event": "stage_completed",
+                    "stage": "backfill",
+                    "repos_completed": completed_repos,
+                    "repos_total": repos_total,
+                    "active_repos": len(repos_active),
+                    "records_written": total_records_ingested,
+                    "duration_seconds": round(elapsed_wall_time, 3),
+                    "api_calls": total_api_calls,
+                    "interrupted": interrupted,
+                }
+            )
+        return result

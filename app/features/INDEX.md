@@ -17,6 +17,7 @@ status changes.
 | [m8_notability_signal.md](m8_notability_signal.md) | done | Legacy standalone compatibility layer; not created or required by canonical raw-history storytelling |
 | [m9_narrative_generation.md](m9_narrative_generation.md) | done | Running-agent Markdown storytelling over raw Fulcra evidence with exact provenance and automatic upload |
 | [m10_packaging.md](m10_packaging.md) | done | Installable, agent-agnostic skill packaging: root SKILL.md, runnable app/ CLI, OAuth device flow with gh confirmation |
+| [m11_pipeline_reliability.md](m11_pipeline_reliability.md) | done | Immutable durable runs, structured JSONL progress, retry-safe Fulcra writes, and exact-window resume for the canonical raw pipeline |
 
 ## Status values
 - `not_started` — described but no work done yet.

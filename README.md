@@ -73,6 +73,37 @@ and uploads it under:
 
 The filename includes the exact activity range and UTC writing date.
 
+## Reliability and resume
+
+Long runs can emit a machine-readable stream suitable for an agent or
+background caller:
+
+```bash
+$PYTHON cli.py pipeline --years 1.0 --yes \
+  --progress-jsonl engineering_journey_progress.jsonl
+```
+
+Events include stable event/stage/timestamp/elapsed fields, repository counts,
+records written, rate/ETA, GitHub heartbeats, Fulcra retry attempts, and final
+stage timings. Transient DNS/network/429/5xx failures use bounded exponential
+backoff. Stable raw fingerprints plus post-error re-query make ambiguous write
+retries duplicate-safe.
+
+To resume, first run without `--yes` to review the durable saved plan, then run
+again after approval:
+
+```bash
+$PYTHON cli.py pipeline --resume --identity <username> \
+  --progress-jsonl engineering_journey_progress.jsonl
+
+$PYTHON cli.py pipeline --resume --identity <username> --yes \
+  --progress-jsonl engineering_journey_progress.jsonl
+```
+
+Resume reuses the original immutable window and durable repository list. A run
+whose raw stage completed skips GitHub entirely and rebuilds only the ephemeral
+narrative handoff.
+
 ## Rewriting without GitHub
 
 Narration context comes from durable Fulcra records, so a rewrite does not need

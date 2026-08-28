@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from checkpoint import format_iso, parse_iso
 from notability import NotabilityEngine, NotabilitySignal
 from rollups import ActivityRollup, RollupEngine, get_period_bounds
+from reliability import retry_call
 
 
 
@@ -155,18 +156,27 @@ def upload_narrative_document(
     start_time: str,
     end_time: str,
     written_at: Optional[datetime] = None,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> str:
-    """Upload UTF-8 markdown through the Fulcra SDK and return its path."""
+    """Upload UTF-8 markdown with bounded retry and return its path."""
     filepath = get_fulcra_narrative_path(
         github_identity, start_time, end_time, written_at=written_at
     )
     payload = doc_content.encode("utf-8")
-    try:
-        client.upload_file(
+
+    def operation() -> Any:
+        return client.upload_file(
             data=io.BufferedReader(io.BytesIO(payload)),
             file_type="text/markdown; charset=utf-8",
             file_size=len(payload),
             filepath=filepath,
+        )
+
+    try:
+        retry_call(
+            operation,
+            operation_name=f"upload narrative {filepath}",
+            on_retry=event_callback,
         )
     except Exception as exc:
         raise NarrativeUploadError(

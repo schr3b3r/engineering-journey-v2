@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import re
 from statistics import median
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from checkpoint import format_iso
 from narrative import get_narrative_filename, upload_narrative_document
@@ -145,6 +145,7 @@ def prepare_agent_handoff(
     raw_items: Optional[List[Any]] = None,
     exact_start_time: Optional[str] = None,
     exact_end_time: Optional[str] = None,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Query raw Fulcra history and produce adaptive, cross-repo agent context."""
     if exact_start_time and exact_end_time:
@@ -170,7 +171,7 @@ def prepare_agent_handoff(
         )
 
     items = raw_items if raw_items is not None else RawActivityIngestor(
-        client
+        client, event_callback=event_callback
     ).get_raw_activities(
         repo=repo,
         github_identity=github_identity,
@@ -368,6 +369,7 @@ def publish_agent_narrative(
     output_dir: str = ".",
     output_path: Optional[str] = None,
     written_at: Optional[datetime] = None,
+    event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> PublishedNarrative:
     """Validate ephemeral agent prose, render it, and publish only the artifact."""
     normalized = validate_agent_response(handoff, response)
@@ -391,5 +393,6 @@ def publish_agent_narrative(
         metadata["start_time"],
         metadata["end_time"],
         written_at=generated_at,
+        event_callback=event_callback,
     )
     return PublishedNarrative(markdown_path, fulcra_path, filename, document)

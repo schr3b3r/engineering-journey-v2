@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import json
 import os
 import sys
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from agent_narration import (
     AgentNarrationValidationError,
@@ -28,6 +28,8 @@ from github_spike import GitHubAPISpike
 from narrative import NarrativeGenerator, NarrativeUploadError
 from notability import NotabilityEngine
 from raw_ingestion import RawActivityIngestor
+from pipeline_run import PipelineRun, PipelineRunManager
+from progress import ProgressReporter
 from rollups import RollupEngine, attach_raw_evidence
 from summarization import RollupSummarizer
 
@@ -55,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_parser.add_argument("--yes", "-y", action="store_true", help="Confirm the displayed account and run plan non-interactively.")
     backfill_parser.add_argument("--device-code", action="store_true", help="Force GitHub device-code auth flow.")
     backfill_parser.add_argument("--dry-run", action="store_true", help="Perform discovery/pre-checks without writing raw records.")
+    backfill_parser.add_argument("--resume", action="store_true", help="Resume latest incomplete durable run for this identity/scope.")
+    backfill_parser.add_argument("--progress-jsonl", help="Machine-readable progress JSONL path.")
 
     # 3. ROLLUP command
     rollup_parser = subparsers.add_parser("rollup", help="Precompute activity rollups and notability signals.")
@@ -89,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_handoff_parser.add_argument("--until", help="Exact immutable pipeline end timestamp.")
     agent_handoff_parser.add_argument("--repo", help="Optional repository filter.")
     agent_handoff_parser.add_argument("--output", required=True, help="JSON handoff path.")
+    agent_handoff_parser.add_argument("--progress-jsonl", help="Append structured progress to this JSONL path.")
 
     publish_parser = subparsers.add_parser(
         "publish-agent-narrative",
@@ -97,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--handoff", required=True, help="Grounded handoff JSON path.")
     publish_parser.add_argument("--response", required=True, help="Agent-authored response JSON path.")
     publish_parser.add_argument("--output", help="Optional local markdown output path.")
+    publish_parser.add_argument("--progress-jsonl", help="Append structured progress to this JSONL path.")
 
     # 6. PIPELINE / RUN-ALL command
     pipeline_parser = subparsers.add_parser("pipeline", aliases=["run-all"], help="Execute complete pipeline (backfill -> rollups -> notability -> narrative).")
@@ -110,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument("--yes", "-y", action="store_true", help="Confirm a previously reviewed GitHub account and run plan.")
     pipeline_parser.add_argument("--device-code", action="store_true", help="Force GitHub device-code auth flow.")
     pipeline_parser.add_argument("--dry-run", action="store_true", help="Perform discovery/pre-checks without writing raw records (backfill step only; skips rollup/summarize/narrative since there is no real data to act on).")
+    pipeline_parser.add_argument("--resume", action="store_true", help="Resume the latest incomplete durable run and reuse its exact window/repositories.")
+    pipeline_parser.add_argument("--progress-jsonl", help="Machine-readable progress path (default: engineering_journey_progress.jsonl).")
     pipeline_parser.add_argument(
         "--skip-real-summarization", action="store_true",
         help=(
@@ -142,6 +150,33 @@ def build_parser() -> argparse.ArgumentParser:
 def _emit(message: str = "") -> None:
     """Print progress immediately, including through buffered agent shells."""
     print(message, flush=True)
+
+
+def _progress_reporter(args: argparse.Namespace) -> ProgressReporter:
+    existing = getattr(args, "_progress_reporter", None)
+    if existing:
+        return existing
+    path = getattr(args, "progress_jsonl", None)
+    if path is None and args.command in ("pipeline", "run-all", "backfill"):
+        path = "engineering_journey_progress.jsonl"
+        args.progress_jsonl = path
+    reporter = ProgressReporter(
+        path,
+        human_callback=_emit,
+        append=bool(getattr(args, "resume", False))
+        or args.command == "publish-agent-narrative",
+    )
+    args._progress_reporter = reporter
+    if reporter.path:
+        _emit(f"[progress] Machine-readable events: {reporter.path}")
+        reporter.emit(
+            {
+                "event": "progress_stream_ready",
+                "stage": "pipeline",
+                "path": str(reporter.path),
+            }
+        )
+    return reporter
 
 
 def _activity_window(args: argparse.Namespace) -> tuple[str, str]:
@@ -178,6 +213,11 @@ def _confirm_backfill_plan(
     _emit(f"Range duration:               {duration_days:.1f} days")
     _emit(f"Repository scope:             {args.repo or 'all accessible repositories'}")
     _emit(f"Mode:                         {'discovery only; no writes' if args.dry_run else 'write durable records to Fulcra'}")
+    if getattr(args, "resume", False):
+        resume_run = getattr(args, "_resume_run", None)
+        _emit(
+            f"Resume:                       durable run {resume_run.run_id if resume_run else 'requested'}; reuse its exact window and repo list"
+        )
     if pipeline and not args.dry_run:
         if getattr(args, "narration_mode", "agent") == "agent":
             _emit("Stages:                       backfill raw history → agent evidence handoff → this LLM writes → validated Fulcra file")
@@ -234,12 +274,14 @@ def handle_auth(args: argparse.Namespace) -> int:
 
 
 def handle_backfill(args: argparse.Namespace) -> int:
-    """Review and execute a raw GitHub activity backfill."""
+    """Review, run, or resume the canonical raw-history backfill."""
     try:
-        f_client = get_fulcra_client()
+        client = get_fulcra_client()
     except FulcraAuthError as err:
         print(f"Error: Fulcra client failed: {err}", file=sys.stderr, flush=True)
         return 1
+    reporter = _progress_reporter(args)
+    run_manager = PipelineRunManager(client, event_callback=reporter.emit)
 
     try:
         token = get_github_auth_token(
@@ -248,60 +290,191 @@ def handle_backfill(args: argparse.Namespace) -> int:
             auto_accept_existing=args.yes,
         )
     except ExistingAuthConfirmationRequired as err:
-        # Planning is local and safe: show account and range together so an
-        # agent can obtain one informed approval before rerunning with --yes.
-        since_iso, until_iso = _activity_window(args)
         target_identity = args.identity or err.identity
-        _confirm_backfill_plan(
-            args, err.identity, target_identity, since_iso, until_iso
+        resume_run = (
+            run_manager.latest_incomplete(target_identity, args.repo)
+            if getattr(args, "resume", False) else None
         )
+        if resume_run:
+            args._resume_run = resume_run
+            since_iso, until_iso = resume_run.start_time, resume_run.end_time
+        else:
+            since_iso, until_iso = _activity_window(args)
+        _confirm_backfill_plan(args, err.identity, target_identity, since_iso, until_iso)
         print(f"GitHub authentication not used: {err}", file=sys.stderr, flush=True)
         return 2
     except GitHubAuthenticationCancelled as err:
         print(f"GitHub authentication not used: {err}", file=sys.stderr, flush=True)
         return 2
+
     authenticated_identity = get_token_identity(token) or "unknown"
-    identity = args.identity or (authenticated_identity if authenticated_identity != "unknown" else None)
+    identity = args.identity or (
+        authenticated_identity if authenticated_identity != "unknown" else None
+    )
     if not identity:
-        print("Error: Could not determine GitHub username identity. Pass --identity explicitly.", file=sys.stderr)
+        print(
+            "Error: Could not determine GitHub username identity. Pass --identity explicitly.",
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
 
-    since_iso, until_iso = _activity_window(args)
+    run: Optional[PipelineRun] = None
+    if getattr(args, "resume", False):
+        run = run_manager.latest_incomplete(identity, args.repo)
+        if run is None:
+            print(
+                "Error: no incomplete durable run exists for this identity/repository scope.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        since_iso, until_iso = run.start_time, run.end_time
+        args.repo = run.repo
+        args._resume_run = run
+        _emit(
+            f"[resume] Found run {run.run_id}: stage={run.stage}, "
+            f"repositories={run.next_repo_index}/{len(run.repositories)}, "
+            f"window={since_iso} to {until_iso}."
+        )
+        reporter.emit(
+            {
+                "event": "resume_plan",
+                "stage": run.stage,
+                "run_id": run.run_id,
+                "start_time": since_iso,
+                "end_time": until_iso,
+                "repos_completed": run.next_repo_index,
+                "repos_total": len(run.repositories),
+            }
+        )
+    else:
+        since_iso, until_iso = _activity_window(args)
+
     if not _confirm_backfill_plan(
         args, authenticated_identity, identity, since_iso, until_iso
     ):
         return 2
-    # Downstream stages must keep the exact reviewed identity and immutable window.
-    args.identity = identity
-    args.since = since_iso
-    args.until = until_iso
+    args.identity, args.since, args.until = identity, since_iso, until_iso
 
-    _emit(f"\n[backfill] Starting for {identity}; progress will continue below.")
-    spike = GitHubAPISpike(token=token, progress_callback=_emit)
-    engine = BackfillEngine(
-        fulcra_client=f_client, github_api=spike, progress_callback=_emit
+    spike = GitHubAPISpike(
+        token=token,
+        progress_callback=_emit,
+        event_callback=reporter.emit,
     )
-
     if args.dry_run:
         _emit("[dry-run] Discovering repositories; no records will be written...")
         repos = spike.discover_user_repos(github_identity=identity)
         _emit(f"[dry-run] Discovery complete: {len(repos)} repositories accessible.")
         return 0
 
+    if run is None:
+        run = PipelineRun.create(identity, since_iso, until_iso, args.repo)
+        run_manager.save(run)
+    args._pipeline_run = run
+    args._pipeline_run_manager = run_manager
+
+    if run.stage in ("raw_complete", "handoff_complete"):
+        _emit(
+            f"[resume] Raw stage already complete for run {run.run_id}; "
+            "skipping GitHub discovery and all repository processing."
+        )
+        reporter.emit(
+            {
+                "event": "stage_skipped",
+                "stage": "backfill",
+                "run_id": run.run_id,
+                "reason": "durable raw_complete state",
+            }
+        )
+        return 0
+
+
+    if run.repositories:
+        repositories = run.repositories
+        _emit(
+            f"[resume] Reusing {len(repositories)} durable discovered repositories; "
+            "GitHub discovery skipped."
+        )
+    else:
+        reporter.start_stage("discovery", "[discovery] Listing accessible repositories...")
+        repositories = [args.repo] if args.repo else spike.discover_user_repos(identity)
+        run.repositories = repositories
+        run.next_repo_index = 0
+        run.stage = "repos_discovered"
+        run_manager.save(run)
+        reporter.finish_stage(
+            "discovery",
+            f"[discovery] Saved {len(repositories)} repositories in durable run state.",
+            repositories=len(repositories),
+        )
+
+    start_index = min(run.next_repo_index, len(repositories))
+    remaining = repositories[start_index:]
+    base_records = run.records_ingested
+    def event_callback(event: Dict[str, Any]) -> None:
+        reporter.emit({"run_id": run.run_id, **event})
+        completed = int(event.get("repos_completed", run.next_repo_index))
+        should_checkpoint = (
+            completed > run.next_repo_index
+            and (completed % 25 == 0 or event.get("event") == "stage_completed")
+        )
+        if should_checkpoint:
+            run.next_repo_index = completed
+            run.records_ingested = base_records + int(event.get("records_written", 0))
+            run.stage = "repos_discovered"
+            run_manager.save(run)
+    engine = BackfillEngine(
+        fulcra_client=client,
+        github_api=spike,
+        progress_callback=_emit,
+        event_callback=event_callback,
+    )
+    reporter.start_stage(
+        "backfill",
+        f"[backfill] Processing repositories {start_index + 1}..{len(repositories)} "
+        f"for immutable run {run.run_id}.",
+    )
     summary = engine.run_backfill(
         github_identity=identity,
         start_time=since_iso,
         end_time=until_iso,
-        repos=[args.repo] if args.repo else None,
+        repos=remaining,
+        repo_offset=start_index,
+        repos_total_override=len(repositories),
+        kill_after_n_records=getattr(args, "kill_after_n_records", None),
     )
+    run.records_ingested = base_records + int(summary["records_ingested"])
+    if summary["interrupted"]:
+        run.stage = "repos_discovered"
+        run_manager.save(run)
+        reporter.emit(
+            {
+                "event": "pipeline_interrupted",
+                "stage": "backfill",
+                "run_id": run.run_id,
+                "repos_completed": run.next_repo_index,
+                "records_written": run.records_ingested,
+            }
+        )
+        return 130
 
+    run.next_repo_index = len(repositories)
+    run.stage = "raw_complete"
+    run_manager.save(run)
+    reporter.finish_stage(
+        "backfill",
+        "[backfill] Raw history and coverage are complete.",
+        repositories=len(repositories),
+        records_written=run.records_ingested,
+        github_api_calls=summary["api_calls_made"],
+    )
     _emit("\n--- Backfill Execution Summary ---")
-    _emit(f"Identity: {summary.get('github_identity')}")
-    _emit(f"Total Repos Processed: {summary.get('repos_total')}")
-    _emit(f"Active Repos Ingested: {len(summary.get('repos_active', []))}")
-    _emit(f"Total Raw Records Written: {summary.get('records_ingested')}")
-    _emit(f"GitHub API Calls: {summary.get('api_calls_made')}")
-    _emit(f"Wall-Clock Time: {summary.get('wall_time_seconds')}s")
+    _emit(f"Run ID: {run.run_id}")
+    _emit(f"Immutable window: {since_iso} to {until_iso}")
+    _emit(f"Repositories: {len(repositories)}")
+    _emit(f"Total raw records written: {run.records_ingested}")
+    _emit(f"This invocation: {summary['wall_time_seconds']}s, {summary['api_calls_made']} GitHub API calls")
     return 0
 
 
@@ -455,7 +628,10 @@ def handle_agent_handoff(args: argparse.Namespace) -> int:
     except FulcraAuthError as err:
         print(f"Error: Fulcra client failed: {err}", file=sys.stderr, flush=True)
         return 1
-    _emit("[agent narration] Loading durable rollups, signals, and raw evidence...")
+    reporter = _progress_reporter(args)
+    reporter.start_stage(
+        "handoff", "[agent narration] Loading durable raw evidence from Fulcra..."
+    )
     handoff = prepare_agent_handoff(
         client=client,
         github_identity=args.identity,
@@ -463,6 +639,7 @@ def handle_agent_handoff(args: argparse.Namespace) -> int:
         repo=getattr(args, "repo", None),
         exact_start_time=getattr(args, "since", None),
         exact_end_time=getattr(args, "until", None),
+        event_callback=reporter.emit,
     )
     if not handoff["chunks"]:
         print(
@@ -473,6 +650,21 @@ def handle_agent_handoff(args: argparse.Namespace) -> int:
         return 1
     with open(args.output, "w", encoding="utf-8") as file_handle:
         json.dump(handoff, file_handle, indent=2, ensure_ascii=False)
+    run = getattr(args, "_pipeline_run", None)
+    run_manager = getattr(args, "_pipeline_run_manager", None)
+    if run and run_manager:
+        handoff["pipeline_run_id"] = run.run_id
+        handoff["progress_jsonl"] = str(reporter.path) if reporter.path else None
+        with open(args.output, "w", encoding="utf-8") as file_handle:
+            json.dump(handoff, file_handle, indent=2, ensure_ascii=False)
+        run.stage = "handoff_complete"
+        run_manager.save(run)
+    reporter.finish_stage(
+        "handoff",
+        "[agent narration] Raw evidence handoff complete.",
+        raw_records=handoff["metadata"]["raw_record_count"],
+        chunks=len(handoff["chunks"]),
+    )
     _emit(
         f"[agent narration] Handoff ready: {args.output} "
         f"({handoff['metadata']['raw_record_count']} raw records in "
@@ -487,7 +679,7 @@ def handle_agent_handoff(args: argparse.Namespace) -> int:
 
 
 def handle_publish_agent_narrative(args: argparse.Namespace) -> int:
-    """Validate, render, persist, and upload prose authored by the running agent."""
+    """Validate, render, and retry-safe publish prose authored by the running agent."""
     try:
         client = get_fulcra_client()
     except FulcraAuthError as err:
@@ -498,21 +690,52 @@ def handle_publish_agent_narrative(args: argparse.Namespace) -> int:
             handoff = json.load(file_handle)
         with open(args.response, "r", encoding="utf-8") as file_handle:
             response = json.load(file_handle)
-        _emit("[agent narration] Validating period/source completeness...")
-        published = publish_agent_narrative(
-            client, handoff, response, output_path=args.output
+        if not getattr(args, "progress_jsonl", None):
+            args.progress_jsonl = handoff.get("progress_jsonl")
+        reporter = _progress_reporter(args)
+        reporter.start_stage(
+            "publish",
+            "[agent narration] Validating chronology and raw-source completeness...",
         )
-    except (OSError, json.JSONDecodeError, AgentNarrationValidationError) as err:
+        published = publish_agent_narrative(
+            client,
+            handoff,
+            response,
+            output_path=args.output,
+            event_callback=reporter.emit,
+        )
+    except (
+        OSError,
+        json.JSONDecodeError,
+        AgentNarrationValidationError,
+        NarrativeUploadError,
+    ) as err:
         print(f"Error: agent narrative was not published: {err}", file=sys.stderr, flush=True)
         return 1
+
+    run_id = handoff.get("pipeline_run_id")
+    if run_id:
+        manager = PipelineRunManager(client, event_callback=reporter.emit)
+        matching = [run for run in manager.get_runs() if run.run_id == run_id]
+        if matching:
+            run = matching[0]
+            run.stage = "published"
+            manager.save(run)
+    reporter.finish_stage(
+        "publish",
+        "[agent narration] Grounded narrative validated and published.",
+        markdown_path=published.markdown_path,
+        fulcra_path=published.fulcra_path,
+    )
+    reporter.finish_pipeline()
     _emit(f"[agent narration] Local markdown: {published.markdown_path}")
     _emit(f"[agent narration] Fulcra file: {published.fulcra_path}")
-    _emit("[agent narration] Grounded narrative validated and published successfully.")
     return 0
 
 
 def handle_pipeline(args: argparse.Namespace) -> int:
     """Run durable stages, then hand narration to the selected explicit mode."""
+    reporter = _progress_reporter(args)
     _emit("=" * 60)
     _emit(" Engineering Journey v2 — Guided Pipeline")
     _emit("=" * 60)
@@ -522,6 +745,9 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     )
     _emit(f"[pipeline] Narration mode: {narration_mode}")
     _emit("[pipeline] No activity data has been touched yet.")
+    reporter.emit(
+        {"event": "pipeline_started", "stage": "pipeline", "narration_mode": narration_mode}
+    )
 
     if narration_mode == "external" and not getattr(args, "dry_run", False):
         import subprocess
@@ -556,12 +782,17 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             f"engineering_journey_handoff_{args.identity}_{args.since[:10]}_to_{args.until[:10]}.json"
         )
         handoff_args = argparse.Namespace(
+            command="agent-handoff",
             identity=args.identity,
             range=args.range,
             since=args.since,
             until=args.until,
             repo=args.repo,
             output=handoff_output,
+            progress_jsonl=getattr(args, "progress_jsonl", None),
+            _progress_reporter=reporter,
+            _pipeline_run=getattr(args, "_pipeline_run", None),
+            _pipeline_run_manager=getattr(args, "_pipeline_run_manager", None),
         )
         return handle_agent_handoff(handoff_args)
 
