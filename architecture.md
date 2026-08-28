@@ -254,31 +254,26 @@ scalar-shaped, so they stay on their original base types too.)
   a genuine case for using both together rather than treating them as
   mutually exclusive.
 
-### 4. "GitHub Backfill Checkpoint" (base type: `DurationAnnotation`)
-Resumable backfill progress marker. Named distinctly from the archived
-prior project's "GitHub Backfill Progress"/"GitHub Backfill Progress V2"
-to avoid any ambiguity about lineage, even though those names are free
-again after archiving.
-- **`recorded_at` semantics:** the real `{start_time, end_time}` of the
-  date range this checkpoint covers (using `DurationAnnotation`'s native
-  range field) -- NOT the moment the checkpoint was written. Even though
-  a checkpoint is inherently a "progress marker" (the one case Intake's
-  own `recorded_at` guidance flags as a legitimate ingestion-time use),
-  this project's checkpoints are scoped to a specific historical range
-  being backfilled, so the range itself is the more useful, query-
-  relevant timestamp; genuine last-write/ingestion time belongs in a
-  separate `updated_at` field inside the JSON `note` payload instead,
-  kept distinct from `recorded_at`.
-- **Tags:** `repo` (checkpoints are tracked per repo, so that extending
-  a backfill -- forward or backward -- can determine per-repo which
-  ranges are already covered without re-deriving it from a single
-  monolithic marker), `github_identity`, `status`
-  (`in_progress`|`completed`).
-- **Sources:** none beyond identifying this record's own type; not a
-  derived record.
-- **`note`:** JSON blob with the actual discovered repo list state,
-  last-processed-item cursor, and `updated_at` (real last-write time,
-  kept separate from `recorded_at` per above).
+### 4. GitHub backfill coverage and progress
+
+Issue #9 supersedes the original all-in-one `GitHub Backfill Checkpoint`
+design while retaining it as a read-only legacy format.
+
+- **`GitHub Backfill Coverage` (`DurationAnnotation`):** one completed
+  repository/subrange marker. `recorded_at.start_time/end_time` is the actual
+  historical source window that was checked, including zero-activity windows.
+  Tags identify repository, GitHub identity, and completed status.
+- **`GitHub Backfill Progress` (`MomentAnnotation`):** bounded operational
+  cursor milestones. `recorded_at` is the actual update instant; the requested
+  source window, cursor, and item count remain descriptive fields in `note`.
+  The default milestone interval is 100 newly written raw records.
+- **Crash semantics:** durable raw item IDs are the idempotency authority. A
+  replay after a crash skips already-stored raw items, so a crash between
+  milestones creates neither omissions nor duplicates.
+- **Legacy transition:** readers merge the old duration records with the two
+  new types, but writers never create more legacy records. Cleanup begins with
+  a non-destructive inventory and requires a separately confirmed owner action
+  after equivalent coverage is verified.
 
 ## Tenancy
 Single Fulcra account, single GitHub identity per ingestion run (per

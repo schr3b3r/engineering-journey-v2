@@ -9,7 +9,8 @@ Ingest a user-provided span of a developer's GitHub activity (from their own aut
 - **Root `SKILL.md`**: Installable agent skill specification for fresh agent sessions or human users.
 - **`app/` Application Code & CLI**: Standalone, directly runnable Python application and CLI, run from inside `app/` (`cd app && python cli.py ...` or `cd app && python main.py ...`) with zero hard agent dependencies. This project's modules use flat, sibling-style imports throughout, so the CLI is invoked from inside `app/`, not via `python -m app.cli` from the repo root.
 - **Durable Record Architecture in Fulcra**:
-  - `GitHub Backfill Checkpoint` (`DurationAnnotation`): Resumable progress tracking.
+  - `GitHub Backfill Coverage` (`DurationAnnotation`): Completed repository/subrange coverage at source time.
+  - `GitHub Backfill Progress` (`MomentAnnotation`): Bounded resumable cursor milestones at actual update time.
   - `GitHub Activity Raw` (`MomentAnnotation`): Uniform daily granularity for commits, PR opens/merges, reviews, comments. Real event-time `recorded_at`.
   - `Activity Rollup` (`DurationAnnotation`): Precomputed counts across Day, Week, Month, Quarter, Year periods with provenance chains.
   - `Notability Signal` (`NumericAnnotation`): Statistical eventfulness scores with baseline comparison details.
