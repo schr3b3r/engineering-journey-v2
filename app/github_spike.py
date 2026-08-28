@@ -43,6 +43,7 @@ class GitHubAPISpike:
         token: Optional[str] = None,
         base_url: str = "https://api.github.com",
         progress_callback: Optional[Callable[[str], None]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         self.base_url = base_url.rstrip("/")
@@ -54,10 +55,20 @@ class GitHubAPISpike:
             self.headers["Authorization"] = f"token {self.token}"
         self.api_call_count: int = 0
         self.progress_callback = progress_callback
+        self.event_callback = event_callback
 
     def _progress(self, message: str) -> None:
         if self.progress_callback:
             self.progress_callback(message)
+        if self.event_callback:
+            self.event_callback(
+                {
+                    "event": "heartbeat",
+                    "stage": "github",
+                    "message": message,
+                    "api_calls": self.api_call_count,
+                }
+            )
 
     def _get(self, url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> requests.Response:
         """Helper wrapper around requests.get that increments api_call_count."""

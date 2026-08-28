@@ -32,6 +32,14 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Issue #13 reliability now targets the simplified raw-history path: a durable
+`Engineering Journey Run` stores the immutable window, discovered repos, stage,
+and bounded repo milestones. `--resume` reuses that state, skips discovery, and
+skips all GitHub work after `raw_complete`. Human progress is mirrored to JSONL
+with counts/rate/ETA/heartbeats and final stage summaries. Retryable Fulcra
+DNS/network/429/5xx failures use bounded exponential backoff; deterministic raw
+fingerprints plus post-error re-query make ambiguous retries duplicate-safe.
+
 Canonical narration now uses the LLM already running the skill over durable raw
 Fulcra history. Default `pipeline` backfills only missing raw coverage, then
 exports adaptive in-memory evidence chunks; the current agent synthesizes
@@ -90,6 +98,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(issue #13 on raw-history architecture)** Reliability is concentrated in four small pieces: `reliability.py` retry classification/backoff, `progress.py` JSONL events/timings, `pipeline_run.py` durable immutable stage state, and raw fingerprint ambiguity checks. Rollup/notability recovery was deliberately not rebuilt because those records are retired from canonical mode.
 - **(issues #14 / post-#12 architecture correction)** Raw Fulcra history is the durable engineering memory; interpretation is ephemeral. The running agent adaptively interprets compact raw evidence with exact record IDs/URLs. Default pipeline does not build derived records or check provider credentials. The publisher stores only the final file artifact. A referenced bootstrap fixes direct Hermes installs without duplicating app code.
 
 - **(post-#11)** Guided, observable execution: account and run-plan approval are distinct user decisions presented together before work. EOF, cancellation, and unconfirmed non-interactive sessions fail closed. `--yes` is valid only after an agent relays the account/plan and obtains explicit approval. Optional progress callbacks keep libraries reusable while CLI/script paths flush continuous contextual output.
