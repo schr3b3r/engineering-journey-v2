@@ -57,10 +57,10 @@ load_dotenv(REPO_ROOT / ".env")
 from fulcra_client import FulcraAuthError, get_fulcra_client  # noqa: E402
 from github_auth import get_github_auth_token, get_token_identity  # noqa: E402
 from raw_ingestion import RawActivityIngestor  # noqa: E402
-from rollups import RollupEngine  # noqa: E402
+from rollups import RollupEngine, attach_raw_evidence  # noqa: E402
 from summarization import RollupSummarizer  # noqa: E402
 
-from harness.providers import call_model  # noqa: E402
+from harness.providers import call_model, select_provider  # noqa: E402
 
 
 def make_summary_provider_fn(provider: str | None):
@@ -110,7 +110,20 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true",
         help="Print how many period groups/prompts would be generated without calling a model or writing back.",
     )
+    parser.add_argument(
+        "--check-provider", action="store_true",
+        help="Validate model credentials and exit before accessing Fulcra or GitHub.",
+    )
     args = parser.parse_args(argv)
+
+    if args.check_provider:
+        try:
+            selected = args.provider or select_provider()
+        except Exception as err:
+            print(f"Error: no usable narrative model provider: {err}", file=sys.stderr)
+            return 2
+        print(f"Narrative model provider ready: {selected}")
+        return 0
 
     try:
         f_client = get_fulcra_client()
@@ -142,10 +155,32 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"Found {len(rollups)} rollup records.")
 
+    # Rehydrate semantic evidence from Fulcra's durable raw records. This is
+    # intentionally not a GitHub fetch: old v2 rollups predate evidence_items,
+    # but their source facts are already stored and remain sufficient to
+    # rewrite the narrative offline.
+    raw_items = RawActivityIngestor(f_client).get_raw_activities(
+        github_identity=identity, start_time=since_iso, end_time=until_iso,
+    )
+    attach_raw_evidence(rollups, raw_items)
+
+    # Day/week prompts multiply the same facts without improving the story.
+    # Month supplies pacing; quarter/year supply hierarchical trajectory.
+    synthesis_rollups = [
+        rollup for rollup in rollups
+        if rollup.period_type in {"month", "quarter", "year"}
+    ]
+    if not synthesis_rollups:
+        synthesis_rollups = rollups
+    print(
+        f"Selected {len(synthesis_rollups)} month/quarter/year rollups and "
+        f"{len(raw_items)} durable raw evidence records for synthesis."
+    )
+
     summarizer = RollupSummarizer(client=f_client)
 
     if args.dry_run:
-        handoff = summarizer.prepare_period_handoff(rollups)
+        handoff = summarizer.prepare_period_handoff(synthesis_rollups)
         print(f"\n[Dry Run] Would generate {len(handoff)} cross-repo period summaries:")
         for h in handoff:
             print(
@@ -157,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n--- Generating real period summaries via provider={args.provider or 'auto'} ---")
     summary_provider_fn = make_summary_provider_fn(args.provider)
     updated = summarizer.summarize_periods_and_write_back(
-        rollups, summary_provider_fn=summary_provider_fn, save_to_fulcra=True,
+        synthesis_rollups, summary_provider_fn=summary_provider_fn, save_to_fulcra=True,
     )
     print(f"Wrote back real summaries for {len(updated)} rollup records.")
     print(
