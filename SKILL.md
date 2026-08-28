@@ -82,16 +82,47 @@ backfill using one immutable window, then adaptively chunks compact raw Fulcra
 evidence in memory, writes a range-based JSON handoff, and stops successfully.
 It does not build persisted derived interpretation or invoke an external model.
 
-Run long commands with streaming output, or as a managed background process
-that is polled frequently. Relay repository, record, stage, retry, and elapsed
-updates to the user. Never leave a long tool call silent.
+Run the pipeline as a managed background process. The moment it starts, send a
+real natural-language message to the user, for example:
 
-The JSONL file is the reliable relay surface for agent/background execution.
-Poll it while the process runs. Every event includes `event`, `stage`,
-`timestamp`, and `elapsed_seconds`; backfill events add repository counts,
-records written, rate, and ETA. GitHub calls emit heartbeats, Fulcra retries
-emit attempt/delay/error details, and the final event contains stage-by-stage
-timings and counts.
+> Started the one-year ingestion. I’ll report at least every 15 seconds; the
+> machine-readable stream is `engineering_journey_progress.jsonl`.
+
+### Mandatory user-facing monitoring loop
+
+Tool-progress rows such as `proc poll`, `read`, and `wait` are **not user
+communication**. The agent MUST follow this loop until the process exits:
+
+1. Wait no more than 15 seconds. Never call `process.wait` with a timeout above
+   15 seconds (especially not 60 seconds).
+2. In one tool batch, poll the process and run:
+
+   ```bash
+   $PYTHON cli.py progress-status --file engineering_journey_progress.jsonl
+   ```
+
+3. Before any subsequent poll/read/wait tool call, emit a user-visible
+   natural-language commentary message that relays that status. Two monitoring
+   tool batches may never be consecutive without an intervening commentary
+   update.
+4. If counters did not change, still say the process is alive and report the
+   current stage/repository and elapsed time. Example:
+
+   > Still working on PR details for `acme/api`; 18/313 repositories checked,
+   > 101 raw records written, 2m 10s elapsed. No new repository completed in
+   > this interval, but the GitHub heartbeat is current.
+
+5. On retries, immediately explain the transient error, attempt, and delay. On
+   stage changes, announce the completed stage and next stage. On failure,
+   report the failed operation and resume command. On completion, relay the
+   stage timing/count summary before beginning narrative authoring.
+
+Use `progress-status --json` only when structured fields are needed. Do not
+repeatedly read the raw JSONL file or reread the same line range; if debugging
+requires raw reads, track the last consumed offset and read only new lines.
+
+This cadence is part of the product, not optional narration style. Never remain
+inside a long sequence of silent tool calls after approval.
 
 ### 3. Write the narrative with this running LLM
 
