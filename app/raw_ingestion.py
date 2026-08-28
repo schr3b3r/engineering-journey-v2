@@ -61,6 +61,7 @@ def activity_item_from_record(record: Dict[str, Any]) -> GitHubActivityItem:
         title_or_summary=note_data.get("title_or_summary", ""),
         url=note_data.get("url", ""),
         raw_payload=note_data.get("raw_payload") or {},
+        record_id=record.get("id"),
     )
 
 

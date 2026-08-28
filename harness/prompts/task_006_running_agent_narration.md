@@ -1,0 +1,13 @@
+Restore the core product requirement with the simplest architecture: in normal skill usage, the LLM already running the skill writes the Engineering Journey narrative. No Anthropic/Gemini/OpenAI API key, provider login, or second model client may be required.
+
+Read Hermes' current skills documentation first. Treat agent-run skill mode as canonical. Keep deterministic Python responsible only for durable data retrieval, bounded grounded handoff construction, schema/provenance validation, rollup summary write-back, markdown assembly, and Fulcra upload.
+
+Implement a two-step agent bridge:
+1. An app CLI command prepares one bounded JSON handoff from durable Fulcra records. It contains exact identity/range metadata, chronological monthly periods, selected raw title/body evidence with raw IDs, repositories, notability/pacing hints, rollup IDs, and explicit narrative/schema instructions. It must not hit GitHub merely to narrate.
+2. The running agent reads that handoff, writes a structured JSON response containing a concise trajectory overview and exactly one grounded narrative section per expected period. A second deterministic CLI command validates period/source completeness, rejects malformed/unknown/missing periods, writes period summaries back to the correct durable rollups, assembles the normal provenance-bearing markdown, saves it locally, and uploads it automatically to Fulcra.
+
+Make agent narration the default documented skill workflow. External provider scripting may remain only as an explicitly selected standalone alternative; remove provider preflight/API credentials from normal agent mode. Never present deterministic fallback as equivalent. Preserve the existing four-value NarrativeGenerator return API where relevant.
+
+Fix direct Hermes URL installation using the documented bundling rules: direct installs include SKILL.md and exact referenced files under scripts/references/templates/assets/examples, not arbitrary app/. Add one small referenced bootstrap script that idempotently clones/updates the repository into an organized cache/work directory and prints the runnable app path. Do not duplicate the app source tree. Test bootstrap from an isolated temporary HOME/cache against a local repository URL override so the test is deterministic.
+
+Add an end-to-end test where a provider-free fake running agent consumes a real handoff fixture, returns grounded structured prose, and the publish command validates, persists, renders, and uploads it. Assert no harness/provider imports or credential checks occur in canonical agent mode. Update SKILL/README/feature/context docs and run the full suite. Commit app changes through the harness git_commit gate.
