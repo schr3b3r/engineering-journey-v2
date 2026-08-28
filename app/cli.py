@@ -18,7 +18,7 @@ from github_spike import GitHubAPISpike
 from narrative import NarrativeGenerator
 from notability import NotabilityEngine
 from raw_ingestion import RawActivityIngestor
-from rollups import RollupEngine
+from rollups import RollupEngine, attach_raw_evidence
 from summarization import RollupSummarizer
 
 
@@ -251,6 +251,10 @@ def handle_summarize(args: argparse.Namespace) -> int:
         start_time=since_iso,
         end_time=until_iso,
     )
+    raw_items = RawActivityIngestor(f_client).get_raw_activities(
+        github_identity=identity, start_time=since_iso, end_time=until_iso,
+    )
+    attach_raw_evidence(rollups, raw_items)
     print(f"\n--- Preparing Cross-Repo Period Summarization Handoff ({len(rollups)} rollups) ---")
 
     summarizer = RollupSummarizer(client=f_client)
@@ -309,6 +313,27 @@ def handle_pipeline(args: argparse.Namespace) -> int:
     print("============================================================")
     print(" Engineering Journey v2 — End-to-End Pipeline Execution")
     print("============================================================")
+
+    # Fail before a potentially long GitHub/Fulcra run when the requested
+    # quality narrative cannot be generated. Explicit skip is an honest opt-in.
+    if not getattr(args, "skip_real_summarization", False) and not getattr(args, "dry_run", False):
+        import subprocess
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(repo_root, "scripts", "summarize_periods.py")
+        check_cmd = [sys.executable, script_path, "--check-provider"]
+        if getattr(args, "provider", None):
+            check_cmd += ["--provider", args.provider]
+        check = subprocess.run(check_cmd, cwd=repo_root)
+        if check.returncode != 0:
+            print(
+                "\nError: a quality Engineering Journey requires a configured "
+                "model provider, and none is usable. No backfill was started. "
+                "Configure harness provider credentials, or explicitly pass "
+                "--skip-real-summarization to produce a clearly labelled limited fallback.",
+                file=sys.stderr,
+            )
+            return check.returncode
 
     # Step 1: Auth check & Backfill
     ret = handle_backfill(args)

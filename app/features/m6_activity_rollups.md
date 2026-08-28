@@ -13,6 +13,7 @@ Precompute and durably store "Activity Rollup" records (`DurationAnnotation` bas
 - [x] Real Fulcra tags attached for `period_type`, `github_identity`, and `repo` (when scoped).
 - [x] Real provenance chains (`sources`) reference raw activity records (for day rollups) or lower-layer rollup records (for higher periods).
 - [x] Rollup records are saved to and queryable from Fulcra durably.
+- [x] Rollups persist a bounded, deterministic `evidence_items` projection (title/summary, relevant body excerpt, URL, activity type, repository, and `raw:` source ID) so grounded synthesis can be rerun from Fulcra without another GitHub fetch.
 - [x] Has automated tests (pytest) covering rollup generation across all period types, provenance tracing, saving/querying, and the FULL test suite passes — see `app/ENGINEERING_STANDARDS.md`.
 
 ## Dependencies

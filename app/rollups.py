@@ -20,6 +20,82 @@ ROLLUP_ANNOTATION_TYPE = "duration"
 ROLLUP_DESCRIPTION = "Precomputed activity rollups over day, week, month, quarter, and year periods"
 ROLLUP_TAG = "activity_rollup"
 VALID_PERIOD_TYPES = {"day", "week", "month", "quarter", "year"}
+MAX_EVIDENCE_ITEMS_PER_ROLLUP = 50
+
+
+def _clean_evidence_text(value: Any, limit: int = 500) -> str:
+    """Normalize user-authored GitHub text before placing it in model handoffs."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def activity_to_evidence(item: GitHubActivityItem) -> Dict[str, str]:
+    """Project a raw item into compact, traceable narrative evidence."""
+    payload = item.raw_payload if isinstance(item.raw_payload, dict) else {}
+    body = ""
+    for key in ("body", "message", "description"):
+        body = _clean_evidence_text(payload.get(key))
+        if body:
+            break
+    if not body and isinstance(payload.get("commit"), dict):
+        body = _clean_evidence_text(payload["commit"].get("message"))
+    return {
+        "source_id": f"raw:{item.repo}:{item.item_id}",
+        "timestamp": item.event_timestamp,
+        "repo": item.repo,
+        "activity_type": item.activity_type,
+        "title": _clean_evidence_text(item.title_or_summary, 300),
+        "body_excerpt": body,
+        "url": item.url,
+    }
+
+
+def _select_evidence(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Deterministically retain diverse, informative evidence within a budget."""
+    unique: Dict[str, Dict[str, str]] = {}
+    for item in items:
+        source_id = item.get("source_id", "")
+        if source_id and source_id not in unique:
+            unique[source_id] = item
+    ranked = sorted(
+        unique.values(),
+        key=lambda item: (
+            not bool(item.get("title") or item.get("body_excerpt")),
+            item.get("timestamp", ""),
+            item.get("repo", ""),
+            item.get("source_id", ""),
+        ),
+    )
+    if len(ranked) <= MAX_EVIDENCE_ITEMS_PER_ROLLUP:
+        return ranked
+    selected: List[Dict[str, str]] = []
+    seen_repos = set()
+    for item in ranked:
+        repo = item.get("repo", "")
+        if repo not in seen_repos:
+            selected.append(item)
+            seen_repos.add(repo)
+    selected_ids = {item["source_id"] for item in selected}
+    selected.extend(item for item in ranked if item["source_id"] not in selected_ids)
+    return selected[:MAX_EVIDENCE_ITEMS_PER_ROLLUP]
+
+
+def attach_raw_evidence(
+    rollups: List["ActivityRollup"], raw_items: List[GitHubActivityItem]
+) -> List["ActivityRollup"]:
+    """Hydrate legacy rollups from durable raw records without querying GitHub."""
+    projected = [(item, activity_to_evidence(item)) for item in raw_items]
+    for rollup in rollups:
+        matching = [
+            evidence
+            for item, evidence in projected
+            if (not rollup.repo or item.repo == rollup.repo)
+            and rollup.start_time <= item.event_timestamp <= rollup.end_time
+        ]
+        if matching:
+            rollup.evidence_items = _select_evidence(matching)
+    return rollups
 
 
 def get_period_bounds(dt: datetime, period_type: str) -> Tuple[str, str]:
@@ -66,6 +142,7 @@ class ActivityRollup:
     total_activity_count: int = 0
     sources: List[str] = field(default_factory=list)
     summary_text: Optional[str] = None
+    evidence_items: List[Dict[str, str]] = field(default_factory=list)
     record_id: Optional[str] = None
 
     def get_source_id(self) -> str:
@@ -86,6 +163,7 @@ class ActivityRollup:
             "counts": self.counts,
             "total_activity_count": self.total_activity_count,
             "summary_text": self.summary_text,
+            "evidence_items": self.evidence_items,
             "record_id": self.record_id,
         }
 
@@ -121,6 +199,7 @@ class ActivityRollup:
             total_activity_count=total,
             sources=sources,
             summary_text=note_data.get("summary_text"),
+            evidence_items=note_data.get("evidence_items") or [],
             record_id=record.get("id") or note_data.get("record_id"),
         )
 
@@ -207,6 +286,7 @@ class RollupEngine:
                     sources.append(f"raw:{it.repo}:{it.item_id}")
 
             total = sum(counts.values())
+            evidence_items = _select_evidence([activity_to_evidence(it) for it in items])
             rollups.append(
                 ActivityRollup(
                     period_type="day",
@@ -217,6 +297,7 @@ class RollupEngine:
                     counts=counts,
                     total_activity_count=total,
                     sources=sources,
+                    evidence_items=evidence_items,
                 )
             )
 
@@ -256,6 +337,9 @@ class RollupEngine:
                 sources.append(sub_r.get_source_id())
 
             total = sum(counts.values())
+            evidence_items = _select_evidence(
+                [item for sub_r in constituent for item in sub_r.evidence_items]
+            )
             rollups.append(
                 ActivityRollup(
                     period_type=target_period_type,
@@ -266,6 +350,7 @@ class RollupEngine:
                     counts=counts,
                     total_activity_count=total,
                     sources=sources,
+                    evidence_items=evidence_items,
                 )
             )
 

@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from checkpoint import format_iso, parse_iso
 from notability import NotabilityEngine, NotabilitySignal
 from rollups import ActivityRollup, RollupEngine, get_period_bounds
-from summarization import generate_fallback_summary
+
 
 
 @dataclass
@@ -113,6 +113,18 @@ def get_narrative_filename(
     return f"{prefix}_{clean_identity}_{clean_label}.md"
 
 
+def _human_period_heading(period_type: str, start_time: str) -> str:
+    """Render calendar buckets as headings people naturally scan."""
+    dt = parse_iso(start_time)
+    if period_type == "month":
+        return dt.strftime("%B %Y")
+    if period_type == "quarter":
+        return f"Q{((dt.month - 1) // 3) + 1} {dt.year}"
+    if period_type == "year":
+        return str(dt.year)
+    return f"{start_time[:10]} ({period_type})"
+
+
 def build_narrative_prompt(
     rollups: List[ActivityRollup],
     signals: List[NotabilitySignal],
@@ -142,13 +154,27 @@ def build_narrative_prompt(
 
     notable_text = "\n".join(notable_lines) if notable_lines else "  - No major activity spikes recorded."
 
+    grounded_periods = []
+    for rollup in sorted(rollups, key=lambda r: (r.start_time, r.period_type, r.repo or "")):
+        if rollup.summary_text and rollup.period_type in ("month", "quarter", "year"):
+            grounded_periods.append(
+                f"- {rollup.period_type} {rollup.start_time[:10]} ({rollup.repo or 'cross-repo'}): "
+                f"{rollup.summary_text} [rollup {rollup.get_source_id()}]"
+            )
+    period_text = "\n".join(dict.fromkeys(grounded_periods)) or "- No grounded period summaries are available."
+
     prompt = (
-        f"Write an engaging, paced developer story for '{github_identity}' "
+        f"Write a concise executive overview for '{github_identity}' "
         f"covering period '{range_label}' ({start_time[:10]} to {end_time[:10]}):\n"
         f"- Repositories Involved: {', '.join(repos) if repos else 'None'}\n"
         f"- Total Activities: {total_activities}\n"
-        f"- Period Highlights & Signals:\n{notable_text}\n\n"
-        f"Instructions: Focus on major milestones, work pacing, focus shifts, and key achievements."
+        f"- Period Highlights & Signals:\n{notable_text}\n"
+        f"- Grounded chronological period summaries:\n{period_text}\n\n"
+        f"Instructions: In 1-3 paragraphs, explain the trajectory, major "
+        f"technical themes, and meaningful focus shifts. Name concrete work "
+        f"only when present in a grounded period summary. Synthesize across "
+        f"repositories only where the evidence supports it. Avoid a stats "
+        f"dump, repetition, unsupported impact claims, and key/value prose."
     )
     return prompt
 
@@ -165,6 +191,17 @@ def generate_fallback_narrative_prose(
             f"During the requested period ({range_label}), {github_identity} had no recorded GitHub activity. "
             f"This represents a quiet period with no repository contributions or issue/PR interactions."
         )
+
+    # Prefer durable, model-authored hierarchy over rebuilding an overview
+    # from counts. This supports narrative rewrites without another GitHub call.
+    for period_type in ("year", "quarter", "month"):
+        summaries = list(dict.fromkeys(
+            r.summary_text
+            for r in sorted(rollups, key=lambda item: item.start_time)
+            if r.period_type == period_type and r.summary_text
+        ))
+        if summaries:
+            return " ".join(summaries)
 
     total_activities = sum(r.total_activity_count for r in rollups)
     repos = sorted(list(set(r.repo for r in rollups if r.repo)))
@@ -243,7 +280,7 @@ def format_narrative_document(
     period_sections = []
     for key in period_order:
         group = period_groups[key]
-        period_type, start_time, end_time = key
+        period_type, period_start_time, period_end_time = key
         repos_in_period = sorted({r.repo for r in group if r.repo})
 
         # A real, written-back cross-repo summary exists if every rollup
@@ -264,37 +301,36 @@ def format_narrative_document(
             shared_summary = next(iter(summary_texts))
             repo_list_str = ", ".join(f"`{repo}`" for repo in repos_in_period)
             period_sections.append(
-                f"### {start_time[:10]} to {end_time[:10]} ({period_type})\n"
-                f"- **Repositories:** {repo_list_str}\n"
-                f"- **Total Activity Across Repos:** {total_count_this_period}\n"
-                f"- **Summary:** {shared_summary}\n"
-                f"- **Source Rollup Records:** {rec_ids_str}\n"
+                f"### {_human_period_heading(period_type, period_start_time)}\n\n"
+                f"{shared_summary}\n"
             )
         else:
-            # Fall back to the original per-repo rendering for this
-            # period, honestly (each rollup gets its own line, using its
-            # own summary_text or the deterministic per-rollup fallback)
-            # -- rather than pretending a cross-repo synthesis happened
-            # when summarize_periods_and_write_back was never run.
-            for r in sorted(group, key=lambda x: x.repo or ""):
-                repo_part = f" (`{r.repo}`)" if r.repo else ""
-                summary = r.summary_text or generate_fallback_summary(r)
-
-                matching_sig = next(
-                    (s for s in sorted_signals if s.start_time == r.start_time and s.period_type == r.period_type and s.repo == r.repo),
-                    None,
+            # Limited mode stays compact: one transition per calendar period,
+            # never an exhaustive per-repository template. It may quote a few
+            # durable titles, but does not pretend those facts were synthesized.
+            evidence_titles = list(dict.fromkeys(
+                item.get("title", "")
+                for r in group
+                for item in r.evidence_items
+                if item.get("title")
+            ))
+            repo_names = ", ".join(repos_in_period[:4])
+            more_repos = " and others" if len(repos_in_period) > 4 else ""
+            if evidence_titles:
+                title_text = "; ".join(f"“{title}”" for title in evidence_titles[:3])
+                transition = f"Recorded work included {title_text}"
+                if repo_names:
+                    transition += f" across {repo_names}{more_repos}"
+                transition += "."
+            else:
+                transition = (
+                    f"Activity continued across {repo_names}{more_repos}."
+                    if repo_names else "Recorded activity continued during this period."
                 )
-                sig_str = ""
-                if matching_sig:
-                    cats = f" [{', '.join(matching_sig.categories)}]" if matching_sig.categories else ""
-                    sig_str = f" - *Notability Score:* `{matching_sig.score:.1f}/100`{cats}"
-
-                rec_id_str = f" (Record ID: `{r.get_source_id()}`)"
-                period_sections.append(
-                    f"### Period: {r.start_time[:10]} to {r.end_time[:10]}{repo_part}\n"
-                    f"- **Activity Count:** {r.total_activity_count} activities{sig_str}\n"
-                    f"- **Summary:** {summary}{rec_id_str}\n"
-                )
+            period_sections.append(
+                f"### Transition: {_human_period_heading(period_type, period_start_time)}\n\n"
+                f"{transition}\n"
+            )
 
     paced_story = "\n".join(period_sections) if period_sections else "_No period rollups available._\n"
 
@@ -304,11 +340,10 @@ def format_narrative_document(
         if s.score >= 50.0 or any(c in s.categories for c in ("volume_surge", "first_activity", "focus_switch", "streak"))
     ]
     notable_items = []
-    for sig in high_notable_signals:
+    for sig in sorted(high_notable_signals, key=lambda item: item.score, reverse=True)[:5]:
         repo_part = f" in `{sig.repo}`" if sig.repo else ""
-        cats = ", ".join(sig.categories) if sig.categories else "high_notability"
         notable_items.append(
-            f"- **{sig.start_time[:10]}**{repo_part}: Score `{sig.score:.1f}/100` (`{cats}`). {sig.explanation} (Record ID: `{sig.get_source_id()}`)"
+            f"- **{_human_period_heading(sig.period_type, sig.start_time)}**{repo_part}: {sig.explanation}"
         )
 
     highlights_section = "\n".join(notable_items) if notable_items else "- No specific high-volume surges recorded."
@@ -328,6 +363,10 @@ def format_narrative_document(
         for src in r.sources:
             if src.startswith("raw:"):
                 all_raw_sources.add(src)
+        for item in r.evidence_items:
+            source_id = item.get("source_id", "")
+            if source_id.startswith("raw:"):
+                all_raw_sources.add(source_id)
 
     rollup_table = "\n".join(rollup_prov_lines) if rollup_prov_lines else "| None | - | - | - | 0 |"
 
@@ -349,18 +388,25 @@ def format_narrative_document(
     # 3. Raw Source References
     raw_sources_sorted = sorted(list(all_raw_sources))
     if raw_sources_sorted:
-        raw_sources_text = "\n".join([f"- `{src}`" for src in raw_sources_sorted[:20]])
-        if len(raw_sources_sorted) > 20:
-            raw_sources_text += f"\n- ... and {len(raw_sources_sorted) - 20} more raw activity record sources."
+        raw_sources_text = "\n".join([f"- `{src}`" for src in raw_sources_sorted])
     else:
         raw_sources_text = "- None explicitly linked."
+
+    has_grounded_summaries = any(r.summary_text for r in paced_rollups)
+    quality_notice = "" if has_grounded_summaries else (
+        "\n> **Limited deterministic fallback:** No model-authored period summaries "
+        "were available. This activity-oriented report is not equivalent to the "
+        "grounded Engineering Journey narrative. Configure a harness provider and "
+        "run period summarization, then regenerate from the durable records.\n"
+    )
 
     doc = (
         f"# Engineering Journey: {github_identity}\n\n"
         f"**Range:** {range_label} (`{start_time[:10]}` to `{end_time[:10]}`)\n"
         f"**Generated At:** `{now_iso}`\n"
         f"**Repositories:** {', '.join([f'`{repo}`' for repo in repos]) if repos else 'None'}\n"
-        f"**Total Activities:** {total_activities}\n\n"
+        f"**Total Activities:** {total_activities}\n"
+        f"{quality_notice}\n"
         f"---\n\n"
         f"## Story Overview\n\n"
         f"{prose}\n\n"
@@ -388,7 +434,7 @@ def format_narrative_document(
 
 
 def parse_narrative_document(doc_content: str) -> NarrativeProvenance:
-    """Parse a generated markdown document and extract all record IDs from the Provenance Appendix."""
+    """Parse IDs from their structural appendix tables, including UUID IDs."""
     rollup_ids: List[str] = []
     signal_ids: List[str] = []
     raw_source_ids: List[str] = []
@@ -400,19 +446,46 @@ def parse_narrative_document(doc_content: str) -> NarrativeProvenance:
     else:
         appendix_text = doc_content
 
-    # Extract all code-span backtick items: `item`
-    code_spans = re.findall(r"`([^`]+)`", appendix_text)
+    def table_ids(heading: str) -> List[str]:
+        match = re.search(
+            rf"### {re.escape(heading)}\s*\n(.*?)(?=\n### |\Z)",
+            appendix_text,
+            flags=re.DOTALL,
+        )
+        if not match:
+            return []
+        ids: List[str] = []
+        for line in match.group(1).splitlines():
+            if not line.lstrip().startswith("|") or "---" in line or "Record ID" in line:
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if not cells:
+                continue
+            code_match = re.fullmatch(r"`([^`]+)`", cells[0])
+            if code_match and code_match.group(1) != "None":
+                ids.append(code_match.group(1))
+        return list(dict.fromkeys(ids))
 
-    for item in code_spans:
-        if item.startswith("rollup_") or item.startswith("rollup:"):
-            if item not in rollup_ids:
-                rollup_ids.append(item)
-        elif item.startswith("notability_") or item.startswith("notability:"):
-            if item not in signal_ids:
-                signal_ids.append(item)
-        elif item.startswith("raw:"):
-            if item not in raw_source_ids:
-                raw_source_ids.append(item)
+    rollup_ids = table_ids("Activity Rollup Records")
+    signal_ids = table_ids("Notability Signal Records")
+
+    raw_match = re.search(
+        r"### Raw Activity Item Source References\s*\n(.*?)(?=\n### |\Z)",
+        appendix_text,
+        flags=re.DOTALL,
+    )
+    if raw_match:
+        raw_source_ids = list(dict.fromkeys(
+            item for item in re.findall(r"`(raw:[^`]+)`", raw_match.group(1))
+        ))
+
+    # Legacy malformed-document detection: prefixed IDs outside their table
+    # remain invalid rather than becoming invisible after the structural parser.
+    for item in re.findall(r"`([^`]+)`", appendix_text):
+        if (item.startswith("rollup_") or item.startswith("rollup:")) and item not in rollup_ids:
+            rollup_ids.append(item)
+        elif (item.startswith("notability_") or item.startswith("notability:")) and item not in signal_ids:
+            signal_ids.append(item)
 
     return NarrativeProvenance(
         rollup_record_ids=rollup_ids,
@@ -432,17 +505,12 @@ def verify_narrative_provenance(
     rollup_source_ids = set(r.get_source_id() for r in rollups)
     signal_source_ids = set(s.get_source_id() for s in signals)
 
-    # All parsed rollup IDs must match known rollups
-    for r_id in prov.rollup_record_ids:
-        if r_id not in rollup_source_ids:
-            return False
-
-    # All parsed signal IDs must match known signals
-    for s_id in prov.signal_record_ids:
-        if s_id not in signal_source_ids:
-            return False
-
-    return True
+    # Exact equality catches unknown IDs, missing rows, duplicate/truncated
+    # appendices, and the former vacuous-success case in both directions.
+    return (
+        set(prov.rollup_record_ids) == rollup_source_ids
+        and set(prov.signal_record_ids) == signal_source_ids
+    )
 
 
 class NarrativeGenerator:
