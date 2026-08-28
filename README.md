@@ -8,11 +8,11 @@ and automatic Fulcra publishing.
 
 The normal skill workflow does not create a second model client:
 
-1. Python ingests GitHub activity into durable Fulcra records.
-2. Python computes rollups/notability and exports a bounded grounded handoff.
-3. The LLM already running the skill writes the overview and period prose.
-4. Python validates exact period/source completeness, persists summaries,
-   assembles the markdown/provenance appendix, and uploads it to Fulcra.
+1. Python ingests normalized raw GitHub activity into durable Fulcra records.
+2. Python adaptively chunks compact raw evidence in memory for the requested range.
+3. The LLM already running the skill writes cross-repository trajectory prose.
+4. Python validates section/raw-source grounding, assembles provenance, and
+   uploads the final artifact—without persisting derived interpretation.
 
 No OpenAI, Anthropic, or Gemini API key is required for agent narration.
 External-provider mode remains an explicit standalone alternative only.
@@ -21,9 +21,11 @@ Durable Fulcra records include:
 
 - `GitHub Backfill Coverage` source-time durations;
 - `GitHub Backfill Progress` operational moments;
-- `GitHub Activity Raw` title/body evidence;
-- day/week/month/quarter/year `Activity Rollup` records; and
-- statistical `Notability Signal` records.
+- `GitHub Activity Raw` title/body evidence with exact record IDs and GitHub URLs.
+
+Rollups, notability scores, and LLM summaries are not required or persisted by
+the canonical workflow. The same raw history can be reinterpreted by future
+models and prompts.
 
 ## Hermes direct installation
 
@@ -61,8 +63,9 @@ $PYTHON cli.py publish-agent-narrative \
   --response <agent-response.json>
 ```
 
-The publisher rejects cross-run, missing-period, duplicate-period, and source-ID
-mismatches. On success, it writes a local markdown file and uploads it under:
+The publisher rejects modified/cross-run context, malformed chronology, and
+missing/duplicate/unknown raw IDs. On success, it writes a local markdown file
+and uploads it under:
 
 ```text
 /engineering-journeys/<identity>/<writing-year>/

@@ -16,8 +16,10 @@ records, bounded evidence retrieval, validation, provenance, and publishing.
 - Do not substitute deterministic activity prose for an LLM narrative.
 - The current agent must read the grounded handoff and write the prose itself.
 - Technical claims must come from handoff evidence; never infer from repo names.
-- The final markdown must pass deterministic period/source validation and be
+- The final markdown must pass deterministic section/raw-source validation and be
   uploaded automatically to the user's Fulcra account.
+- Do not create or require Activity Rollup, Notability Signal, or persisted LLM
+  summary records in normal skill mode. Interpretation is ephemeral.
 
 ## Runtime bootstrap
 
@@ -74,10 +76,10 @@ After approval:
 $PYTHON cli.py pipeline --years 1.0 --yes
 ```
 
-Agent narration is the default. This command performs backfill, rollups, and
-notability using one immutable window, then writes a range-based JSON handoff
-and stops successfully. It does not check or invoke any external model
-provider.
+Agent narration is the default. This command completes any missing raw-history
+backfill using one immutable window, then adaptively chunks compact raw Fulcra
+evidence in memory, writes a range-based JSON handoff, and stops successfully.
+It does not build persisted derived interpretation or invoke an external model.
 
 Run long commands with streaming output, or as a managed background process
 that is polled frequently. Relay repository, record, stage, retry, and elapsed
@@ -89,12 +91,11 @@ The pipeline prints the handoff path. Read the complete JSON with the file
 reading tool. It contains:
 
 - exact identity and range;
-- chronological period IDs;
+- adaptive retrieval chunks (direct for small ranges; volume-bounded monthly
+  chunks for larger ranges);
 - selected commit/PR/issue titles and body excerpts;
-- raw evidence source IDs;
+- exact raw Fulcra record IDs and GitHub URLs;
 - repository groupings;
-- notability and pacing hints;
-- exact source rollup IDs; and
 - the required response schema.
 
 Using your current model reasoning, write one response JSON file matching that
@@ -104,11 +105,14 @@ schema exactly:
 {
   "context_id": "copy from handoff",
   "overview": "Concise trajectory, themes, and focus shifts...",
-  "periods": [
+  "sections": [
     {
-      "period_id": "copy expected period ID",
-      "source_rollup_ids": ["copy every expected rollup ID"],
-      "narrative": "Grounded technical prose for this period..."
+      "section_id": "unique readable ID",
+      "title": "Chronological or thematic title",
+      "start_time": "ISO timestamp in range",
+      "end_time": "ISO timestamp in range",
+      "raw_record_ids": ["exact supporting raw Fulcra IDs"],
+      "narrative": "Grounded technical prose..."
     }
   ]
 }
@@ -116,9 +120,12 @@ schema exactly:
 
 Rules:
 
-- Include every expected period exactly once.
-- Expand periods marked `expand` into 2–5 substantive sentences.
-- Compress `brief_transition` periods into one concise sentence.
+- Use retrieval chunks as temporary context-management aids, not mandatory
+  final section boundaries.
+- Make final sections chronological and synthesize cross-repository themes by
+  default; cite exact supporting raw record IDs for every section.
+- Adapt detail to evidence density: expand meaningful turning points and
+  compress routine stretches.
 - Connect repositories only when titles/body evidence supports the connection.
 - Name concrete systems, features, migrations, and frameworks when evidenced.
 - Do not invent intent, impact, technologies, causality, or achievements.
@@ -133,14 +140,12 @@ $PYTHON cli.py publish-agent-narrative \
   --response <agent-response.json>
 ```
 
-The deterministic publisher rejects wrong-run context IDs, missing/unknown
-periods, duplicate periods, or mismatched source IDs. On success it:
+The deterministic publisher rejects modified/wrong-run context, malformed or
+out-of-order sections, and missing/duplicate/unknown raw IDs. On success it:
 
-1. writes period summaries back to durable rollups;
-2. assembles the chronological markdown and provenance appendix;
-3. verifies provenance completeness;
-4. writes the local markdown; and
-5. uploads it to:
+1. assembles the chronological markdown and raw-record provenance appendix;
+2. writes the local markdown; and
+3. uploads the final artifact to:
 
 ```text
 /engineering-journeys/<identity>/<writing-year>/
@@ -183,8 +188,8 @@ Before declaring completion, verify:
 
 - no external model credential was requested in agent mode;
 - the same reviewed identity and immutable range were used throughout;
-- the response covered every expected period and source ID;
+- every section cites real raw Fulcra IDs from the reviewed handoff;
 - publisher validation succeeded;
 - the markdown contains concrete evidence-grounded technical prose;
-- provenance validation succeeded; and
+- raw-record IDs and GitHub URLs are present in provenance; and
 - the Fulcra file path was printed.
