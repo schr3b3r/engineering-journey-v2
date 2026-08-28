@@ -52,6 +52,10 @@ Ingest a user-provided span of a developer's GitHub activity (from their own aut
    # Generate Narrative Document
    python cli.py narrative --range full --output my_story.md
    ```
+   Narrative generation also uploads the markdown automatically to
+   `/engineering-journeys/<identity>/<writing-year>/` in your Fulcra file
+   store. The filename includes the activity date range and UTC writing date,
+   and the CLI prints the exact saved path.
 
 4. For a real, engaging narrative (not templated per-repo one-liners), generate and persist real cross-repo period summaries first, from the **repo root**:
    ```bash
