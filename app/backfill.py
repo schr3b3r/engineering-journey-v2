@@ -7,7 +7,7 @@ and volume/cost/performance metrics measurement for 1/2/3-year windows.
 
 from datetime import datetime, timedelta, timezone
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from checkpoint import Checkpoint, CheckpointManager
 from github_spike import GitHubActivityItem, GitHubAPISpike
@@ -44,11 +44,19 @@ def calculate_date_window(
 class BackfillEngine:
     """Orchestrates multi-repo activity backfilling into Fulcra with durability and performance metrics."""
 
-    def __init__(self, fulcra_client: Any, github_api: GitHubAPISpike) -> None:
+    def __init__(
+        self,
+        fulcra_client: Any,
+        github_api: GitHubAPISpike,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.fulcra_client = fulcra_client
         self.github_api = github_api
         self.checkpoint_manager = CheckpointManager(fulcra_client)
-        self.raw_ingestor = RawActivityIngestor(fulcra_client)
+        self.progress_callback = progress_callback or (lambda message: print(message, flush=True))
+        self.raw_ingestor = RawActivityIngestor(
+            fulcra_client, progress_callback=self.progress_callback
+        )
 
     def run_backfill(
         self,
@@ -77,9 +85,9 @@ class BackfillEngine:
 
         # Step 1: Discover repos if not explicitly supplied
         if repos is None:
-            print(f"Discovering repositories for {github_identity}...")
+            self.progress_callback(f"[backfill] Discovering repositories for {github_identity}...")
             repos = self.github_api.discover_user_repos(github_identity)
-        print(f"Discovered {len(repos)} repositories. Processing...")
+        self.progress_callback(f"[backfill] Discovered {len(repos)} repositories. Processing...")
 
         repos_total = len(repos)
         repos_covered: List[str] = []
@@ -89,25 +97,21 @@ class BackfillEngine:
         total_records_ingested = 0
         remaining_kill_budget = kill_after_n_records
         interrupted = False
-        last_progress_time = time.perf_counter()
+
 
         # Step 2: Process each repo
         for repo_index, repo in enumerate(repos, start=1):
             if interrupted:
                 break
 
-            # Periodic progress line: every 25 repos, or every 15 seconds,
-            # whichever comes first -- this loop can otherwise run silently
-            # for many minutes across a large repo count with zero visible
-            # output between the initial discovery line and the final
-            # summary, making it indistinguishable from a hang.
-            now = time.perf_counter()
-            if repo_index == 1 or repo_index % 25 == 0 or (now - last_progress_time) >= 15:
-                print(
-                    f"[{repo_index}/{repos_total}] repos processed "
-                    f"({len(repos_active)} active, {total_records_ingested} records so far)..."
-                )
-                last_progress_time = now
+            # Every repository gets a contextual state line. This is
+            # intentionally more conversational than a sparse heartbeat: a
+            # user should always know which repo and operation is current.
+            self.progress_callback(
+                f"[backfill {repo_index}/{repos_total}] {repo}: checking existing coverage "
+                f"({len(repos_active)} active repos, {total_records_ingested} records written)."
+            )
+
 
             # 2a: Calculate sub-ranges not yet covered by completed checkpoints
             uncovered_ranges = self.checkpoint_manager.get_uncovered_ranges(
@@ -119,12 +123,19 @@ class BackfillEngine:
 
             if not uncovered_ranges:
                 repos_covered.append(repo)
+                self.progress_callback(
+                    f"[backfill {repo_index}/{repos_total}] {repo}: already covered; skipping."
+                )
                 continue
 
             for sub_start, sub_end in uncovered_ranges:
                 if interrupted:
                     break
 
+                self.progress_callback(
+                    f"[backfill {repo_index}/{repos_total}] {repo}: prechecking "
+                    f"{sub_start[:10]} to {sub_end[:10]}."
+                )
                 # 2b: Cheap existence pre-check for uncovered range
                 precheck = self.github_api.check_repo_existence(
                     repo=repo,
@@ -146,12 +157,19 @@ class BackfillEngine:
                     self.checkpoint_manager.save_checkpoint(cp)
                     if repo not in repos_no_activity and repo not in repos_active:
                         repos_no_activity.append(repo)
+                    self.progress_callback(
+                        f"[backfill {repo_index}/{repos_total}] {repo}: no activity; "
+                        "saved durable zero-activity coverage."
+                    )
                     continue
 
                 if repo not in repos_active:
                     repos_active.append(repo)
 
                 # 2c: Activity found — fetch items and ingest for subrange
+                self.progress_callback(
+                    f"[backfill {repo_index}/{repos_total}] {repo}: activity found; fetching details."
+                )
                 items = self.github_api.fetch_all_repo_activity(
                     repo=repo,
                     github_identity=github_identity,
@@ -160,6 +178,9 @@ class BackfillEngine:
                 )
 
                 ingest_limit = remaining_kill_budget if remaining_kill_budget is not None else None
+                self.progress_callback(
+                    f"[backfill {repo_index}/{repos_total}] {repo}: ingesting {len(items)} items to Fulcra."
+                )
                 count, latest_cp = self.raw_ingestor.ingest_items(
                     items=items,
                     repo=repo,
@@ -170,6 +191,10 @@ class BackfillEngine:
                 )
 
                 total_records_ingested += count
+                self.progress_callback(
+                    f"[backfill {repo_index}/{repos_total}] {repo}: ingested {count} new items; "
+                    f"{total_records_ingested} total so far."
+                )
 
                 if remaining_kill_budget is not None:
                     remaining_kill_budget -= count

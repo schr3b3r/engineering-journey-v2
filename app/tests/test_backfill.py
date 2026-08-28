@@ -111,7 +111,10 @@ def test_backfill_engine_multi_repo(mock_fulcra_client) -> None:
         repo3: items3,
     })
 
-    engine = BackfillEngine(mock_fulcra_client, mock_gh)
+    progress_messages = []
+    engine = BackfillEngine(
+        mock_fulcra_client, mock_gh, progress_callback=progress_messages.append
+    )
     metrics = engine.run_backfill(
         github_identity=identity,
         start_time=start_time,
@@ -126,6 +129,10 @@ def test_backfill_engine_multi_repo(mock_fulcra_client) -> None:
     assert metrics["api_calls_made"] > 0
     assert metrics["wall_time_seconds"] >= 0.0
     assert metrics["interrupted"] is False
+    assert any("[backfill 1/3]" in message for message in progress_messages)
+    assert any("prechecking" in message for message in progress_messages)
+    assert any("no activity" in message for message in progress_messages)
+    assert any("ingesting" in message for message in progress_messages)
 
     # Verify queried raw activities from Fulcra
     ingestor = RawActivityIngestor(mock_fulcra_client)

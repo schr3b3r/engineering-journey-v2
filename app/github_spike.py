@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 
@@ -37,7 +37,12 @@ class GitHubActivityItem:
 class GitHubAPISpike:
     """Interface for GitHub API discovery, existence checks, and retrieval shapes."""
 
-    def __init__(self, token: Optional[str] = None, base_url: str = "https://api.github.com") -> None:
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        base_url: str = "https://api.github.com",
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
         self.base_url = base_url.rstrip("/")
         self.headers = {
@@ -47,6 +52,11 @@ class GitHubAPISpike:
         if self.token:
             self.headers["Authorization"] = f"token {self.token}"
         self.api_call_count: int = 0
+        self.progress_callback = progress_callback
+
+    def _progress(self, message: str) -> None:
+        if self.progress_callback:
+            self.progress_callback(message)
 
     def _get(self, url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> requests.Response:
         """Helper wrapper around requests.get that increments api_call_count."""
@@ -79,11 +89,15 @@ class GitHubAPISpike:
         genuinely wants to bound discovery (e.g. a fast demo/test).
         """
         repos: List[str] = []
+        self._progress(f"[github] Discovering repositories accessible to {github_identity}...")
 
         if self.token:
             url = f"{self.base_url}/user/repos"
             page = 1
             while limit is None or len(repos) < limit:
+                self._progress(
+                    f"[github] Requesting repository page {page} ({len(repos)} found so far)..."
+                )
                 page_size = 100 if limit is None else min(100, limit - len(repos))
                 params = {
                     "affiliation": "owner,collaborator,organization_member",
@@ -113,6 +127,9 @@ class GitHubAPISpike:
             url = f"{self.base_url}/users/{github_identity}/repos"
             page = 1
             while limit is None or len(repos) < limit:
+                self._progress(
+                    f"[github] Requesting public repository page {page} ({len(repos)} found so far)..."
+                )
                 page_size = 100 if limit is None else min(100, limit - len(repos))
                 try:
                     r = self._get(url, params={"per_page": str(page_size), "page": str(page)})
@@ -132,6 +149,7 @@ class GitHubAPISpike:
                 except Exception:
                     break
 
+        self._progress(f"[github] Repository discovery complete: {len(repos)} repositories.")
         return repos
 
 
@@ -273,7 +291,13 @@ class GitHubAPISpike:
             r = self._get(search_url, params={"q": q})
             if r.status_code == 200:
                 search_data = r.json()
-                for pr_item in search_data.get("items", [])[:limit]:
+                pr_items = search_data.get("items", [])[:limit]
+                for pr_index, pr_item in enumerate(pr_items, start=1):
+                    if pr_index == 1 or pr_index % 10 == 0:
+                        self._progress(
+                            f"[github] {repo}: inspecting PR details "
+                            f"{pr_index}/{len(pr_items)}..."
+                        )
                     pr_num = pr_item.get("number")
                     created_at = pr_item.get("created_at", since)
 
@@ -397,9 +421,18 @@ class GitHubAPISpike:
     ) -> List[GitHubActivityItem]:
         """Fetch all activity types (commits, PRs, comments) for a repo in a date range."""
         items: List[GitHubActivityItem] = []
-        items.extend(self.fetch_commits(repo, github_identity, since, until))
-        items.extend(self.fetch_pull_requests(repo, github_identity, since, until))
-        items.extend(self.fetch_comments(repo, github_identity, since, until))
+        self._progress(f"[github] {repo}: fetching commits...")
+        commits = self.fetch_commits(repo, github_identity, since, until)
+        items.extend(commits)
+        self._progress(f"[github] {repo}: {len(commits)} commits; fetching pull requests...")
+        pull_requests = self.fetch_pull_requests(repo, github_identity, since, until)
+        items.extend(pull_requests)
+        self._progress(
+            f"[github] {repo}: {len(pull_requests)} PR events; fetching comments/reviews..."
+        )
+        comments = self.fetch_comments(repo, github_identity, since, until)
+        items.extend(comments)
+        self._progress(f"[github] {repo}: fetch complete ({len(items)} activity items).")
         # Sort chronologically by event_timestamp
         items.sort(key=lambda x: x.event_timestamp)
         return items

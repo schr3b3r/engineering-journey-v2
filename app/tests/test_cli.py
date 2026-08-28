@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cli import (
+    _confirm_backfill_plan,
     build_parser,
     handle_auth,
     handle_backfill,
@@ -18,6 +19,8 @@ from cli import (
     main,
 )
 from github_auth import (
+    ExistingAuthConfirmationRequired,
+    GitHubAuthenticationCancelled,
     detect_existing_github_auth,
     get_github_auth_token,
     get_token_identity,
@@ -69,6 +72,95 @@ def test_get_github_auth_token_auto_accept(monkeypatch):
     with patch("github_auth.get_token_identity", return_value="octocat"):
         token = get_github_auth_token(auto_accept_existing=True)
         assert token == "fake_env_token_456"
+
+
+@pytest.mark.parametrize("choice", ["", "y", "yes"])
+def test_existing_gh_account_can_be_explicitly_kept(choice):
+    existing = {"token": "current-token", "source": "gh CLI session", "identity": "current-user"}
+    with patch("github_auth.detect_existing_github_auth", return_value=existing):
+        with patch("github_auth.sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", return_value=choice):
+                assert get_github_auth_token() == "current-token"
+
+
+def test_existing_gh_account_can_be_replaced() -> None:
+    existing = {"token": "current-token", "source": "gh CLI session", "identity": "current-user"}
+    with patch("github_auth.detect_existing_github_auth", return_value=existing):
+        with patch("github_auth.sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", return_value="n"):
+                with patch("github_auth.run_device_code_flow", return_value="different-token") as flow:
+                    assert get_github_auth_token() == "different-token"
+                    flow.assert_called_once()
+
+
+def test_existing_gh_account_can_be_cancelled_safely() -> None:
+    existing = {"token": "current-token", "source": "gh CLI session", "identity": "current-user"}
+    with patch("github_auth.detect_existing_github_auth", return_value=existing):
+        with patch("github_auth.sys.stdin.isatty", return_value=True):
+            with patch("builtins.input", return_value="q"):
+                with pytest.raises(GitHubAuthenticationCancelled):
+                    get_github_auth_token()
+
+
+def test_noninteractive_existing_account_requires_prior_confirmation() -> None:
+    existing = {"token": "current-token", "source": "gh CLI session", "identity": "current-user"}
+    with patch("github_auth.detect_existing_github_auth", return_value=existing):
+        with patch("github_auth.sys.stdin.isatty", return_value=False):
+            with pytest.raises(ExistingAuthConfirmationRequired) as exc_info:
+                get_github_auth_token()
+    assert "current-user" in str(exc_info.value)
+    assert "--yes" in str(exc_info.value)
+
+
+def test_run_plan_shows_exact_range_and_defaults_to_cancel(capsys) -> None:
+    args = build_parser().parse_args([
+        "backfill", "--identity", "target-user", "--repo", "acme/api",
+        "--since", "2025-01-01T00:00:00Z", "--until", "2025-03-01T00:00:00Z",
+    ])
+    with patch("cli.sys.stdin.isatty", return_value=True):
+        with patch("builtins.input", return_value=""):
+            assert not _confirm_backfill_plan(
+                args, "authenticated-user", "target-user", args.since, args.until
+            )
+    output = capsys.readouterr().out
+    assert "Authenticated GitHub account: authenticated-user" in output
+    assert "2025-01-01T00:00:00Z  →  2025-03-01T00:00:00Z" in output
+    assert "acme/api" in output
+    assert "Cancelled; no backfill work was started" in output
+
+
+def test_noninteractive_run_plan_requires_explicit_review(capsys) -> None:
+    args = build_parser().parse_args([
+        "pipeline", "--identity", "target-user", "--skip-real-summarization",
+        "--since", "2025-01-01T00:00:00Z", "--until", "2025-02-01T00:00:00Z",
+    ])
+    with patch("cli.sys.stdin.isatty", return_value=False):
+        assert not _confirm_backfill_plan(
+            args, "target-user", "target-user", args.since, args.until
+        )
+    assert "Show the plan above to the user" in capsys.readouterr().out
+
+
+def test_noninteractive_backfill_shows_account_and_plan_before_any_work(
+    monkeypatch, mock_fulcra_client, capsys
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "current-token")
+    with patch("cli.get_fulcra_client", return_value=mock_fulcra_client):
+        with patch("github_auth.get_token_identity", return_value="current-user"):
+            with patch("github_auth.sys.stdin.isatty", return_value=False):
+                with patch("cli.sys.stdin.isatty", return_value=False):
+                    with patch("github_spike.GitHubAPISpike.discover_user_repos") as discover:
+                        result = main([
+                            "backfill", "--identity", "current-user",
+                            "--since", "2025-01-01T00:00:00Z",
+                            "--until", "2025-02-01T00:00:00Z",
+                        ])
+    assert result == 2
+    discover.assert_not_called()
+    captured = capsys.readouterr()
+    assert "Active account: current-user" in captured.out
+    assert "Review Engineering Journey Run Plan" in captured.out
+    assert "2025-01-01T00:00:00Z  →  2025-02-01T00:00:00Z" in captured.out
 
 
 @patch("github_auth.requests.post")

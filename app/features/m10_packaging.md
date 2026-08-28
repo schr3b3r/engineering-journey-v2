@@ -20,3 +20,5 @@ Packaging as an installable, agent-agnostic skill: root-level `SKILL.md` (siblin
 ## Notes
 - `SKILL.md` and `README.md` are present both at the repository root and in `app/`.
 - CLI provides non-interactive options (`--yes`, `--device-code`, `--dry-run`) for automated harnesses and testing environments.
+- Existing GitHub auth presents an explicit use-current/auth-different/cancel choice. Non-interactive sessions fail closed until the agent shows the detected account and exact run plan to the user; `--yes` means that review already happened.
+- Backfill/pipeline shows and confirms exact UTC bounds and continuously flushes contextual stage, repository, fetch, ingestion, synthesis, narrative, and upload progress.

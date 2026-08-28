@@ -7,7 +7,8 @@ wired into M1's Checkpoint mechanism for resumability.
 
 from dataclasses import dataclass, field
 import json
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from checkpoint import (
     DEFAULT_PROGRESS_INTERVAL,
@@ -67,11 +68,15 @@ class RawActivityIngestor:
     """Ingests raw GitHub activity items into Fulcra with durable checkpointing."""
 
     def __init__(
-        self, client: Any, progress_interval: int = DEFAULT_PROGRESS_INTERVAL
+        self,
+        client: Any,
+        progress_interval: int = DEFAULT_PROGRESS_INTERVAL,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.client = client
         self.checkpoint_manager = CheckpointManager(client)
         self.progress_interval = max(1, progress_interval)
+        self.progress_callback = progress_callback
         self._type_info: Optional[Dict[str, Any]] = None
         self._tag_cache: Dict[str, str] = {}
 
@@ -194,6 +199,7 @@ class RawActivityIngestor:
         newly_processed = 0
         examined = 0
         last_examined: Optional[GitHubActivityItem] = None
+        last_progress_at = time.perf_counter()
 
         for item in remaining_items:
             if kill_after_n is not None and newly_processed >= kill_after_n:
@@ -233,6 +239,18 @@ class RawActivityIngestor:
             newly_processed += 1
             existing_ids.add(str(item.item_id))
 
+            now = time.perf_counter()
+            if self.progress_callback and (
+                newly_processed == 1
+                or newly_processed % 25 == 0
+                or (now - last_progress_at) >= 10
+            ):
+                self.progress_callback(
+                    f"[ingest] {repo}: {newly_processed} new / "
+                    f"{len(remaining_items)} considered; latest {item.activity_type}."
+                )
+                last_progress_at = now
+
             if newly_processed % self.progress_interval == 0:
                 latest_cp = Checkpoint(
                     repo=repo,
@@ -271,6 +289,12 @@ class RawActivityIngestor:
             )
             self.checkpoint_manager.save_checkpoint(cp)
             latest_cp = cp
+
+        if self.progress_callback:
+            status = latest_cp.status if latest_cp else "no-op"
+            self.progress_callback(
+                f"[ingest] {repo}: finished with {newly_processed} new records; status={status}."
+            )
 
         return newly_processed, latest_cp
 

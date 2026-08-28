@@ -65,16 +65,38 @@ agent sandbox, CI runner, or any other cloud-hosted environment (rather
 than an interactive session on a personal machine), skip
 `--device-code` entirely and set `GITHUB_TOKEN` to a
 [Personal Access Token](https://github.com/settings/tokens) with `repo`
-and `read:user` scopes instead -- `get_github_auth_token()` picks this up
-automatically without any device-code prompt:
+and `read:user` scopes instead -- `get_github_auth_token()` detects this and
+shows the account for confirmation without starting device-code auth:
 ```bash
 export GITHUB_TOKEN=ghp_your_token_here
-python cli.py auth --yes
+python cli.py auth
 ```
 A generic 404 with no other symptoms when the device-code flow otherwise
 looks correctly implemented is the signature of this: it is not a bug
 in this repo's `github_auth.py`, and retrying/debugging the network
 request will not resolve it from that kind of environment.
+
+### Required interaction protocol for agents
+
+Do not start with `--yes`. First run `auth`, `backfill`, or `pipeline` without
+it. In a terminal, the CLI lets the user use the detected account,
+authenticate differently, or cancel, then shows the exact activity range and
+run plan with a safe default of No. In a non-interactive agent shell, the CLI
+prints the detected account and complete proposed plan, exits without doing
+work, and instructs the agent to ask the human.
+
+Only after the human explicitly approves both the account and the displayed
+plan may the agent rerun the same command with `--yes`. If they want another
+account, use `--device-code` (or have them replace the PAT/session in a cloud
+environment). Never infer approval from an earlier conversation or silently
+reuse an account.
+
+Long pipeline commands must be run with streaming output, or as a managed
+background process that is polled frequently. Relay stage/repository/count
+updates to the user as they appear; do not block silently until completion.
+The CLI flushes contextual progress for discovery, each repository/subrange,
+GitHub fetch categories, ingestion milestones, rollups, LLM periods,
+narrative generation, and Fulcra upload.
 
 ---
 
@@ -86,7 +108,7 @@ The application provides a standalone CLI with zero hard agent dependencies. Run
 To run the complete sequence (Backfill -> Activity Rollups -> Notability Signals -> real cross-repo Summarization -> Narrative Generation):
 ```bash
 cd app
-python cli.py pipeline --years 1.0 --yes
+python cli.py pipeline --years 1.0
 ```
 
 ### Step-by-Step CLI Commands
@@ -99,7 +121,7 @@ python cli.py auth [--yes] [--device-code]
 #### 2. Raw GitHub Activity Backfill
 Ingests commits, PR opens/merges, PR reviews, and issue/PR comments into "GitHub Activity Raw" (`MomentAnnotation`) records with real event-time `recorded_at` timestamps, existence pre-checks, and durable `CheckpointManager` tracking:
 ```bash
-python cli.py backfill --years 1.0 --identity <username> --yes
+python cli.py backfill --years 1.0 --identity <username>
 ```
 
 #### 3. Precompute Activity Rollups & Notability Signals
@@ -148,7 +170,7 @@ Fulcra path, so no follow-up request to an agent is required.
 
 **Recommended:** just run the full pipeline, which invokes step 4b automatically:
 ```bash
-python cli.py pipeline --years 1.0 --yes
+python cli.py pipeline --years 1.0
 ```
 The pipeline checks model credentials before starting a long backfill. Pass
 `--skip-real-summarization` only to explicitly accept limited fallback output,

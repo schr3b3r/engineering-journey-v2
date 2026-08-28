@@ -315,13 +315,17 @@ def test_summarize_periods_and_write_back_persists_one_summary_per_period(mock_f
     summarizer = RollupSummarizer(mock_fulcra_client)
 
     calls = []
+    progress = []
 
     def fake_model_call(prompt: str) -> str:
         calls.append(prompt)
         return "A real, connected cross-repo narrative paragraph, not a template."
 
     updated = summarizer.summarize_periods_and_write_back(
-        month_rollups, summary_provider_fn=fake_model_call, save_to_fulcra=True,
+        month_rollups,
+        summary_provider_fn=fake_model_call,
+        save_to_fulcra=True,
+        progress_callback=progress.append,
     )
 
     # Exactly ONE model call for the whole period group (both repos),
@@ -329,6 +333,8 @@ def test_summarize_periods_and_write_back_persists_one_summary_per_period(mock_f
     assert len(calls) == 1
     assert len(updated) == 2
     assert all(r.summary_text == "A real, connected cross-repo narrative paragraph, not a template." for r in updated)
+    assert "[summarize 1/1]" in progress[0]
+    assert "summary generated and saved" in progress[-1]
 
     # Verify it was actually persisted (queried back from storage), not
     # just mutated in memory.

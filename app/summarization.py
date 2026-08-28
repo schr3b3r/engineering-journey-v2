@@ -285,6 +285,7 @@ class RollupSummarizer:
         rollups: List[ActivityRollup],
         summary_provider_fn: Callable[[str], str],
         save_to_fulcra: bool = True,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> List[ActivityRollup]:
         """High-level cross-repo period summarization workflow.
 
@@ -310,7 +311,14 @@ class RollupSummarizer:
         """
         groups = group_rollups_by_period(rollups)
         all_updated: List[ActivityRollup] = []
-        for group_key, group_rollups in groups:
+        for index, (group_key, group_rollups) in enumerate(groups, start=1):
+            if progress_callback:
+                repo_count = len({r.repo for r in group_rollups if r.repo})
+                progress_callback(
+                    f"[summarize {index}/{len(groups)}] {group_key[0]} "
+                    f"{group_key[1][:10]} to {group_key[2][:10]} across "
+                    f"{repo_count} repositories..."
+                )
             prompt = build_period_summarization_prompt(group_key, group_rollups)
             summary_text = summary_provider_fn(prompt)
             all_updated.extend(
@@ -318,6 +326,10 @@ class RollupSummarizer:
                     group_rollups, summary_text, save_to_fulcra=save_to_fulcra
                 )
             )
+            if progress_callback:
+                progress_callback(
+                    f"[summarize {index}/{len(groups)}] summary generated and saved."
+                )
         return all_updated
 
 
