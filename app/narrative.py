@@ -8,6 +8,7 @@ and saves/names output files deterministically.
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import io
 import json
 import re
 import time
@@ -26,6 +27,10 @@ class NarrativeProvenance:
     rollup_record_ids: List[str]
     signal_record_ids: List[str]
     raw_source_ids: List[str]
+
+
+class NarrativeUploadError(RuntimeError):
+    """Raised when a generated artifact cannot be stored in Fulcra."""
 
 
 def parse_range_selection(
@@ -102,15 +107,72 @@ def prompt_for_range(
     return parse_range_selection(user_val, all_rollups)
 
 
+def _safe_path_component(value: str, default: str = "unknown") -> str:
+    cleaned = re.sub(r"[^\w-]+", "_", value).strip("_.-")
+    return cleaned or default
+
+
 def get_narrative_filename(
     github_identity: str,
     range_label: str,
     prefix: str = "engineering_journey",
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    written_at: Optional[datetime] = None,
 ) -> str:
     """Generate deterministic filename for narrative markdown output."""
-    clean_identity = re.sub(r"[^\w\-]", "_", github_identity)
-    clean_label = re.sub(r"[^\w\-]", "_", range_label)
+    clean_identity = _safe_path_component(github_identity)
+    if start_time and end_time:
+        written = (written_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        return (
+            f"{prefix}_{clean_identity}_{start_time[:10]}_to_{end_time[:10]}_"
+            f"written_{written:%Y-%m-%d}.md"
+        )
+    clean_label = _safe_path_component(range_label, "full")
     return f"{prefix}_{clean_identity}_{clean_label}.md"
+
+
+def get_fulcra_narrative_path(
+    github_identity: str,
+    start_time: str,
+    end_time: str,
+    written_at: Optional[datetime] = None,
+) -> str:
+    """Return an organized, readable path in the owner's Fulcra file store."""
+    written = (written_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    clean_identity = _safe_path_component(github_identity)
+    filename = get_narrative_filename(
+        github_identity, "", start_time=start_time, end_time=end_time,
+        written_at=written,
+    )
+    return f"/engineering-journeys/{clean_identity}/{written:%Y}/{filename}"
+
+
+def upload_narrative_document(
+    client: Any,
+    doc_content: str,
+    github_identity: str,
+    start_time: str,
+    end_time: str,
+    written_at: Optional[datetime] = None,
+) -> str:
+    """Upload UTF-8 markdown through the Fulcra SDK and return its path."""
+    filepath = get_fulcra_narrative_path(
+        github_identity, start_time, end_time, written_at=written_at
+    )
+    payload = doc_content.encode("utf-8")
+    try:
+        client.upload_file(
+            data=io.BufferedReader(io.BytesIO(payload)),
+            file_type="text/markdown; charset=utf-8",
+            file_size=len(payload),
+            filepath=filepath,
+        )
+    except Exception as exc:
+        raise NarrativeUploadError(
+            f"Generated the narrative but failed to save it to Fulcra at {filepath}: {exc}"
+        ) from exc
+    return filepath
 
 
 def _human_period_heading(period_type: str, start_time: str) -> str:
@@ -230,9 +292,10 @@ def format_narrative_document(
     rollups: List[ActivityRollup],
     signals: List[NotabilitySignal],
     narrative_prose: Optional[str] = None,
+    generated_at: Optional[datetime] = None,
 ) -> str:
     """Format full Markdown narrative document with metadata, story, and Provenance Appendix."""
-    now_iso = format_iso(datetime.now(timezone.utc))
+    now_iso = format_iso(generated_at or datetime.now(timezone.utc))
     total_activities = sum(r.total_activity_count for r in rollups if r.period_type == "day") or sum(r.total_activity_count for r in rollups)
     repos = sorted(list(set(r.repo for r in rollups if r.repo)))
 
@@ -520,6 +583,7 @@ class NarrativeGenerator:
         self.client = client
         self.rollup_engine = RollupEngine(client)
         self.notability_engine = NotabilityEngine(client)
+        self.last_fulcra_path: Optional[str] = None
 
     def generate_narrative(
         self,
@@ -531,6 +595,8 @@ class NarrativeGenerator:
         prose_provider_fn: Optional[Callable[[str], str]] = None,
         save_to_file: bool = False,
         output_dir: str = ".",
+        upload_to_fulcra: bool = True,
+        written_at: Optional[datetime] = None,
     ) -> Tuple[str, str, List[ActivityRollup], List[NotabilitySignal]]:
         """Main workflow: fetch rollups + signals for range, generate document, and optionally save file.
 
@@ -543,6 +609,8 @@ class NarrativeGenerator:
             prose_provider_fn: Callback to generate custom prose from task prompt
             save_to_file: If True, writes markdown to disk
             output_dir: Target directory for file output
+            upload_to_fulcra: Automatically upload markdown to the owner's file store
+            written_at: Optional deterministic UTC writing time (primarily for tests)
 
         Returns:
             Tuple of (doc_content, filename, rollups, signals)
@@ -597,6 +665,7 @@ class NarrativeGenerator:
             )
             narrative_prose = prose_provider_fn(prompt)
 
+        generated_at = written_at or datetime.now(timezone.utc)
         doc_content = format_narrative_document(
             github_identity=github_identity,
             range_label=range_label,
@@ -605,9 +674,27 @@ class NarrativeGenerator:
             rollups=filtered_rollups,
             signals=filtered_signals,
             narrative_prose=narrative_prose,
+            generated_at=generated_at,
         )
 
-        filename = get_narrative_filename(github_identity, range_label)
+        filename = get_narrative_filename(
+            github_identity,
+            range_label,
+            start_time=start_time,
+            end_time=end_time,
+            written_at=generated_at,
+        )
+
+        self.last_fulcra_path = None
+        if upload_to_fulcra:
+            self.last_fulcra_path = upload_narrative_document(
+                self.client,
+                doc_content,
+                github_identity,
+                start_time,
+                end_time,
+                written_at=generated_at,
+            )
 
         if save_to_file:
             filepath = f"{output_dir.rstrip('/')}/{filename}"

@@ -1,0 +1,7 @@
+Implement automatic Fulcra storage for every generated Engineering Journey markdown artifact.
+
+Read ENGINEERING_STANDARDS.md, CONTEXT.md, m9 feature spec, narrative.py, cli.py, Fulcra client patterns, and tests first.
+
+After narrative generation, upload the UTF-8 markdown to the authenticated user's Fulcra file store automatically; users must not need to ask an agent to save it. Use a simple organized path under `/engineering-journeys/<github-identity>/<writing-year>/`. The filename must be human-readable and include the actual activity start/end dates and UTC writing date, for example `engineering_journey_2024-01-01_to_2024-12-31_written_2026-08-28.md`. Sanitize path components. The CLI should clearly print the Fulcra path as well as any local output path. Upload failures must be surfaced clearly rather than silently claiming success.
+
+Keep local output behavior for convenience and preserve existing public return tuple compatibility. Make automatic upload the default for NarrativeGenerator, with an explicit programmatic opt-out for tests/special callers if appropriate. Use the Fulcra SDK upload_file method, not shell/CLI calls. Add tests that inspect uploaded bytes, MIME type, size, path naming, range/date semantics, default automatic behavior, opt-out behavior, and CLI messaging. Update docs and context. Run the full app suite and commit app changes through the harness git_commit gate.

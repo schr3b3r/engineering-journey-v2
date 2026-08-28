@@ -125,22 +125,25 @@ def test_cli_backfill_dry_run(monkeypatch):
                 assert ret == 0
 
 
-def test_cli_narrative_command(monkeypatch, tmp_path):
-    """Test CLI narrative subcommand generating document file."""
+def test_cli_narrative_command(monkeypatch, tmp_path, capsys):
+    """Test CLI narrative output locally and reports automatic Fulcra storage."""
     monkeypatch.setenv("GITHUB_TOKEN", "mock_token")
     mock_fulcra = MagicMock()
-
     fake_tuple = ("# Test Story\n\nContent", "test_story.md", [MagicMock()], [MagicMock()])
+    generator = MagicMock()
+    generator.generate_narrative.return_value = fake_tuple
+    generator.last_fulcra_path = "/engineering-journeys/test_user/2026/test_story.md"
 
     with patch("cli.get_fulcra_client", return_value=mock_fulcra):
         with patch("github_auth.get_token_identity", return_value="test_user"):
-            with patch("narrative.NarrativeGenerator.generate_narrative", return_value=fake_tuple):
+            with patch("cli.NarrativeGenerator", return_value=generator):
                 out_file = str(tmp_path / "output_narrative.md")
                 ret = main(["narrative", "--range", "1y", "--output", out_file, "--identity", "test_user"])
                 assert ret == 0
                 assert os.path.exists(out_file)
                 with open(out_file, "r") as f:
                     assert "# Test Story" in f.read()
+    assert "Saved automatically to Fulcra: /engineering-journeys/test_user/2026/test_story.md" in capsys.readouterr().out
 
 
 # Regression tests for real GitHub issue #1 (schr3b3r/engineering-journey-v2):

@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 from typing import Any, List
+from unittest.mock import MagicMock
 import pytest
 
 from conftest import MockFulcraClient
@@ -14,13 +15,16 @@ from github_spike import GitHubActivityItem
 from narrative import (
     NarrativeGenerator,
     NarrativeProvenance,
+    NarrativeUploadError,
     build_narrative_prompt,
     format_narrative_document,
     generate_fallback_narrative_prose,
+    get_fulcra_narrative_path,
     get_narrative_filename,
     parse_narrative_document,
     parse_range_selection,
     prompt_for_range,
+    upload_narrative_document,
     verify_narrative_provenance,
 )
 from notability import NotabilityEngine, NotabilitySignal
@@ -317,9 +321,10 @@ def test_narrative_generator_end_to_end_mock(mock_fulcra_client: MockFulcraClien
             repo="octocat/Hello-World",
             save_to_file=True,
             output_dir=tmpdir,
+            written_at=datetime(2026, 8, 28, 13, 0, tzinfo=timezone.utc),
         )
 
-        assert filename == "engineering_journey_octocat_year_2024.md"
+        assert filename == "engineering_journey_octocat_2024-01-01_to_2024-12-31_written_2026-08-28.md"
         filepath = os.path.join(tmpdir, filename)
         assert os.path.exists(filepath)
 
@@ -331,6 +336,49 @@ def test_narrative_generator_end_to_end_mock(mock_fulcra_client: MockFulcraClien
         assert "## Provenance Appendix" in read_content
 
         assert verify_narrative_provenance(read_content, rollups, fetched_signals) is True
+        expected_fulcra_path = (
+            "/engineering-journeys/octocat/2026/"
+            "engineering_journey_octocat_2024-01-01_to_2024-12-31_written_2026-08-28.md"
+        )
+        assert gen.last_fulcra_path == expected_fulcra_path
+        uploaded = client.uploaded_files[expected_fulcra_path]
+        assert uploaded["data"].decode("utf-8") == doc_content
+        assert uploaded["file_type"] == "text/markdown; charset=utf-8"
+        assert uploaded["file_size"] == len(doc_content.encode("utf-8"))
+
+
+def test_fulcra_path_is_organized_sanitized_and_upload_can_be_disabled(
+    mock_fulcra_client: MockFulcraClient,
+) -> None:
+    written_at = datetime(2027, 2, 3, 12, 0, tzinfo=timezone.utc)
+    path = get_fulcra_narrative_path(
+        "octo cat/../", "2024-02-01T00:00:00Z", "2024-05-31T23:59:59Z",
+        written_at=written_at,
+    )
+    assert path == (
+        "/engineering-journeys/octo_cat/2027/"
+        "engineering_journey_octo_cat_2024-02-01_to_2024-05-31_written_2027-02-03.md"
+    )
+    generator = NarrativeGenerator(mock_fulcra_client)
+    generator.generate_narrative(
+        "octocat", "2024", rollups=[], signals=[], upload_to_fulcra=False,
+        written_at=written_at,
+    )
+    assert generator.last_fulcra_path is None
+    assert mock_fulcra_client.uploaded_files == {}
+
+
+def test_upload_failure_names_the_intended_fulcra_path() -> None:
+    client = MagicMock()
+    client.upload_file.side_effect = RuntimeError("storage unavailable")
+    with pytest.raises(NarrativeUploadError) as exc_info:
+        upload_narrative_document(
+            client, "# Journey", "octocat", "2024-01-01T00:00:00Z",
+            "2024-12-31T23:59:59Z",
+            written_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+        )
+    assert "/engineering-journeys/octocat/2026/" in str(exc_info.value)
+    assert "storage unavailable" in str(exc_info.value)
 
 
 @pytest.mark.skipif(

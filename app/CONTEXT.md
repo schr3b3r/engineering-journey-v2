@@ -32,6 +32,13 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Narrative artifact delivery is automatic: `NarrativeGenerator` uploads each
+generated markdown document to the owner's Fulcra file store under
+`/engineering-journeys/<identity>/<writing-year>/`. The readable filename
+contains the exact activity start/end dates and UTC writing date. CLI output
+prints both the local path and Fulcra path; upload errors fail clearly rather
+than leaving the user to ask an agent to save the artifact afterward.
+
 Issue #9 temporal checkpoint redesign: new writes separate completed
 `GitHub Backfill Coverage` durations (source-time repository/subrange windows)
 from bounded `GitHub Backfill Progress` moments (actual operational update
@@ -87,6 +94,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(post-#9)** Automatic narrative artifact storage: successful generation includes a Fulcra SDK `upload_file` write by default. Owner paths are organized by identity/writing year and filenames encode activity bounds plus writing date. Programmatic callers can explicitly opt out with `upload_to_fulcra=False`; CLI users receive automatic storage and a printed path.
 - **(issue #9)** Coverage/progress temporal split: completed windows belong in `GitHub Backfill Coverage` DurationAnnotations at source time; bounded cursors belong in `GitHub Backfill Progress` MomentAnnotations at update time. Raw-item existence makes replay idempotent between 100-item milestones. Legacy reads are transitional and cleanup is explicitly non-destructive until separately owner-confirmed.
 - **(issues #5-#7)** Grounded hierarchical narrative synthesis and fail-closed provenance: `ActivityRollup.evidence_items` preserves a bounded semantic projection with raw lineage; old records can be hydrated from durable raw Fulcra items; model prompts use this evidence and forbid unsupported connections. Month summaries provide pacing while quarter/year summaries provide trajectory. Limited mode is explicitly non-equivalent and compact. Appendix parsing is table-structural (UUID-safe) with exact-set validation. The model provider preflight happens before pipeline backfill while retaining `--skip-real-summarization` as an explicit limited-mode opt-in.
 - **(post-M10)** Cross-Repo Period Summarization (`summarization.py`'s `group_rollups_by_period`/`build_period_summarization_prompt`/`summarize_periods_and_write_back`, new `scripts/summarize_periods.py`, ported `harness/providers/` multi-provider adapters): fixed a real quality gap where `narrative` output was a flat, templated data dump instead of connected prose, because `summarize` never actually called a model or wrote anything back. The fix keeps `app/`'s zero-LLM-SDK constraint intact by putting the real model call in harness-side tooling (`scripts/summarize_periods.py`, which imports both `app/`'s data layer and `harness/providers/`), not in `app/cli.py`. Grouping is cross-repo per period window (matching how a genuinely good narrative reads -- one paragraph per quarter spanning every active repo, not one per single-repo rollup). `narrative.py` deduplicates by (period bounds, shared summary_text) to render the consolidated paragraph, falling back honestly when no real summary was written back for a period.

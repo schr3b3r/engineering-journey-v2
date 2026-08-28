@@ -141,6 +141,10 @@ Generates a paced narrative story document with a Provenance Appendix for a spec
 ```bash
 python cli.py narrative --range full --identity <username> --output my_story.md
 ```
+Every generated narrative is also saved automatically through the Fulcra SDK
+under `/engineering-journeys/<identity>/<writing-year>/`; its filename includes
+the activity start/end dates and UTC writing date. The CLI prints the exact
+Fulcra path, so no follow-up request to an agent is required.
 
 **Recommended:** just run the full pipeline, which invokes step 4b automatically:
 ```bash

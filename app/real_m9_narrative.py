@@ -29,6 +29,7 @@ class StandaloneMockFulcraClient:
         self.duration_records: list[dict] = []
         self.moment_records: list[dict] = []
         self.numeric_records: list[dict] = []
+        self.uploaded_files: dict[str, bytes] = {}
 
     def annotations_catalog(self) -> list[dict]:
         return self.annotations
@@ -77,6 +78,10 @@ class StandaloneMockFulcraClient:
 
     def numeric_annotations(self, start_time: str, end_time: str, source: str = None) -> list[dict]:
         return self.numeric_records
+
+    def upload_file(self, data, file_type: str, file_size: int, filepath: str) -> dict:
+        self.uploaded_files[filepath] = data.read()
+        return {"filepath": filepath}
 
 
 def main() -> None:
@@ -148,6 +153,7 @@ def main() -> None:
 
         filepath = os.path.join(tmpdir, filename)
         print(f"Document saved to: {filename}")
+        print(f"Fulcra path: {generator.last_fulcra_path}")
         print(f"File size: {os.path.getsize(filepath)} bytes")
 
         # Step 5: Read document end-to-end and display contents
