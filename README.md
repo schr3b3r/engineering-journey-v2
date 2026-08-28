@@ -12,7 +12,10 @@ The normal skill workflow does not create a second model client:
 2. Python adaptively chunks compact raw evidence in memory for the requested range.
 3. The LLM already running the skill writes cross-repository trajectory prose.
 4. Python validates section/raw-source grounding, assembles provenance, and
-   uploads the final artifact—without persisting derived interpretation.
+   uploads the final artifacts—without persisting derived interpretation. The
+   readable narrative and its full raw-record sources file are published as
+   separate same-folder sibling documents, so the narrative stays readable
+   regardless of evidence volume.
 
 No OpenAI, Anthropic, or Gemini API key is required for agent narration.
 External-provider mode remains an explicit standalone alternative only.

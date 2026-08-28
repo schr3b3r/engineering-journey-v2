@@ -21,6 +21,7 @@ Markdown narrative generator that prompts for or accepts a target date range (fu
 - [x] Canonical agent mode accepts a validated overview plus adaptive chronological/thematic sections citing exact raw Fulcra records, then renders and publishes without persisting derived interpretation or requiring external model credentials.
 - [x] Overview synthesis requires an ephemeral, non-persisted `narrative_plan` (trajectory thesis, up to 3 dominant arcs, turning points, optional culmination) before drafting, so prose is editorially selective rather than an inventory of every repository/category. Range/evidence-density guidance (`overview_brief`) adapts the recommended arc count without forcing a fixed narrative template.
 - [x] Deterministically rejects unsupported evaluative/leadership language (e.g. "spearheaded", "led", "robust", "secure", "high-impact", "production-grade") anywhere in the plan, overview, or section prose, and rejects a missing/malformed narrative plan or more than 3 dominant arcs.
+- [x] Publishes two same-folder sibling files instead of one: the narrative (story, sections, a short evidence summary) and a companion `_sources` file holding the complete raw-record provenance table. The main narrative never contains the full per-record table, so it stays readable regardless of evidence volume; the sources file is allowed to scale with it.
 - [x] Has automated tests (pytest) covering the above criteria, and the FULL test suite passes (not just this feature's own tests) — see `app/ENGINEERING_STANDARDS.md`.
 
 ## Dependencies

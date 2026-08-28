@@ -152,10 +152,32 @@ def test_running_agent_raw_handoff_publish_end_to_end(mock_fulcra_client, tmp_pa
     assert "idempotent capture" in published.document
     assert "Activity Count" not in published.document
     assert "Notability" not in published.document
-    assert "Raw Fulcra Record ID" in published.document
+    # The main narrative must stay readable regardless of evidence volume:
+    # no per-record raw evidence table, only a short pointer to the
+    # companion sources file plus the small per-section evidence table.
+    assert "Raw Fulcra Record ID |" not in published.document
+    assert "Full Raw Evidence" in published.document
+    assert published.sources_filename in published.document
+    # The full raw-record table lives in the separate sources artifact.
+    assert "Raw Fulcra Record ID |" in published.sources_document
+    assert by_item["ui-1"] in published.sources_document
+    assert by_item["api-1"] in published.sources_document
+    assert by_item["pay-1"] in published.sources_document
     assert published.markdown_path.endswith("written_2026-08-28.md")
+    assert published.sources_markdown_path.endswith("written_2026-08-28_sources.md")
     assert published.fulcra_path in mock_fulcra_client.uploaded_files
     assert mock_fulcra_client.uploaded_files[published.fulcra_path]["data"].decode() == published.document
+    assert published.sources_fulcra_path in mock_fulcra_client.uploaded_files
+    assert (
+        mock_fulcra_client.uploaded_files[published.sources_fulcra_path]["data"].decode()
+        == published.sources_document
+    )
+    assert published.sources_fulcra_path != published.fulcra_path
+    # Files should be published as siblings in the same identity/year folder.
+    assert (
+        published.sources_fulcra_path.rsplit("/", 1)[0]
+        == published.fulcra_path.rsplit("/", 1)[0]
+    )
     # Publishing is ephemeral interpretation + file artifact only: no derived
     # annotation, rollup, signal, or summary record was added.
     assert record_counts_before == (
@@ -166,6 +188,90 @@ def test_running_agent_raw_handoff_publish_end_to_end(mock_fulcra_client, tmp_pa
     annotation_names = {item["name"] for item in mock_fulcra_client.annotations}
     assert "Activity Rollup" not in annotation_names
     assert "Notability Signal" not in annotation_names
+
+
+def test_main_narrative_stays_bounded_regardless_of_evidence_volume(
+    mock_fulcra_client, tmp_path
+) -> None:
+    """Regression for: 'don't include such a huge table in the output'.
+
+    A large raw-evidence corpus must not inflate the main narrative
+    artifact -- the full per-record table belongs only in the companion
+    sources file, which is allowed to scale with evidence volume.
+    """
+    identity = "volume-dev"
+    raw_items = [
+        GitHubActivityItem(
+            "commit", f"acme/repo-{index % 5}", identity, f"sha-{index}",
+            f"2024-{(index % 12) + 1:02d}-{(index % 28) + 1:02d}T00:00:00Z",
+            f"Commit {index}", "", record_id=f"raw-uuid-{index}",
+        )
+        for index in range(400)
+    ]
+    handoff = prepare_agent_handoff(
+        mock_fulcra_client,
+        identity,
+        raw_items=raw_items,
+        exact_start_time="2024-01-01T00:00:00Z",
+        exact_end_time="2024-12-31T23:59:59Z",
+    )
+    all_raw_ids = [
+        item["raw_record_id"] for chunk in handoff["chunks"] for item in chunk["evidence"]
+    ]
+    # A realistic narrative compresses routine stretches into a handful of
+    # sections, each citing a representative sample of supporting records
+    # (not literally every one of the 400 raw records) -- split evenly
+    # across 4 quarterly sections with a few representative citations each.
+    quarter_size = len(all_raw_ids) // 4
+    quarters = [
+        all_raw_ids[i * quarter_size : (i + 1) * quarter_size if i < 3 else len(all_raw_ids)]
+        for i in range(4)
+    ]
+    representative_quarters = [quarter[:5] for quarter in quarters]
+    response = {
+        "context_id": handoff["context_id"],
+        "narrative_plan": _minimal_plan(
+            "A high volume of commits was distributed across five repositories "
+            "over the full year.",
+            all_raw_ids[:5],
+            sorted({item["repository"] for chunk in handoff["chunks"] for item in chunk["evidence"]}),
+            "2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z",
+        ),
+        "overview": "A high volume of commits was distributed across five repositories over the full year, compressed into quarterly stretches below.",
+        "sections": [
+            {
+                "section_id": f"q{index + 1}-2024",
+                "title": f"Q{index + 1} 2024 — Sustained commit activity",
+                "start_time": f"2024-{index * 3 + 1:02d}-01T00:00:00Z",
+                "end_time": f"2024-{index * 3 + 3:02d}-28T23:59:59Z",
+                "raw_record_ids": quarter_ids,
+                "narrative": f"Commits landed steadily across five repositories in Q{index + 1}, per the evidenced raw activity.",
+            }
+            for index, quarter_ids in enumerate(representative_quarters)
+        ],
+    }
+    published = publish_agent_narrative(
+        mock_fulcra_client,
+        handoff,
+        response,
+        output_dir=str(tmp_path),
+        written_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+    )
+    # The main narrative must never contain the full per-record raw evidence
+    # table, regardless of how many raw records back the story.
+    assert "Raw Fulcra Record ID |" not in published.document
+    # Records beyond the small per-section citation sample are absent from
+    # the main narrative even though they remain valid known evidence.
+    uncited_id = quarters[3][-1]
+    assert uncited_id not in published.document
+    # It stays dramatically smaller than the full raw evidence would make it.
+    assert len(published.document) < len(published.sources_document) / 4
+    # The sources file legitimately grows with evidence volume and contains
+    # every cited raw record, including ones the narrative did not
+    # individually cite.
+    assert uncited_id in published.sources_document
+    for raw_id in ("raw-uuid-0", "raw-uuid-200", "raw-uuid-399"):
+        assert raw_id in published.sources_document
 
 
 def test_agent_response_fails_closed_on_unknown_raw_record(mock_fulcra_client) -> None:
