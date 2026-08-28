@@ -1,42 +1,60 @@
-# Legacy checkpoint migration and cleanup plan
+# Legacy checkpoint migration and cleanup
 
-Issue #9 replaces the legacy `GitHub Backfill Checkpoint` duration log with:
+Canonical ingestion now uses:
 
-- `GitHub Backfill Coverage` (`DurationAnnotation`): one completed source-time
-  coverage window per repository/subrange, including zero-activity checks.
-- `GitHub Backfill Progress` (`MomentAnnotation`): bounded cursor milestones at
-  their actual operational update time.
+- `GitHub History Coverage` (`DurationAnnotation`): one completed source-time
+  interval per run and repository snapshot.
+- `Engineering Journey Run` (`MomentAnnotation`): bounded operational stages
+  and repository milestones at update time.
+- Stable raw fingerprints for replay inside an interrupted repository.
 
-Readers remain backward-compatible with legacy records. No migration or cleanup
-runs automatically, and normal backfills never create additional legacy records.
+The following types are read-only legacy inputs and receive no new canonical
+records:
 
-## Non-destructive inventory
+- `GitHub Backfill Coverage` (per-repository durations)
+- `GitHub Backfill Progress` (cursor moments)
+- `GitHub Backfill Checkpoint` (older combined duration state)
 
-Use `CheckpointManager.plan_legacy_cleanup()` with an authenticated Fulcra
-client. It reports legacy record IDs and separates completed coverage candidates
-from obsolete in-progress candidates. It always returns
-`destructive_action_taken: false`.
+## 1. Non-destructive plan
 
-Before cleanup:
+```bash
+python cli.py coverage-migration --plan
+```
 
-1. Export and retain the inventory and a backup of the legacy records.
-2. For each legacy completed repository/range, verify an equivalent new
-   `GitHub Backfill Coverage` record exists. If it does not, rerun/extend the
-   normal backfill for that range; zero-activity coverage will also be retained.
-3. Verify there is no active backfill process depending on a legacy progress
-   cursor.
-4. Review record counts and representative Timeline queries.
+The plan inventories legacy completed/progress records, groups completed
+per-repository records by identity and source-time window, and shows the
+run-level cohort that would replace each group. It never writes or deletes.
+Back up/review the inventory and inspect representative Timeline queries.
 
-## Separately confirmed cleanup
+## 2. Idempotent migration
 
-Deletion is intentionally not implemented in the application because the
-currently supported Fulcra SDK surface does not establish a safe, tested
-record-level lifecycle operation for these owner records. After the inventory
-has been reviewed, cleanup must be performed through an owner-approved Fulcra
-lifecycle tool/API in a separate, explicit operation with its own confirmation.
-Delete obsolete legacy `in_progress` records first. Delete legacy completed
-records only after equivalent coverage has been verified. Never delete the
-custom type before its records have been inventoried and backed up.
+After review:
 
-Rollback consists of retaining/restoring the backed-up legacy records; the
-reader accepts both models during the transition.
+```bash
+python cli.py coverage-migration --migrate --yes
+```
+
+This creates one `GitHub History Coverage` duration per legacy identity/window
+cohort, including every zero-activity repository represented by legacy
+coverage. Re-running is a no-op for already-created migration run IDs. Legacy
+records and types remain untouched.
+
+Verify the new durations, repository snapshot counts/hashes, gap behavior, and
+Timeline appearance before considering cleanup.
+
+## 3. Separately confirmed destructive cleanup
+
+Cleanup is never automatic. It is refused unless every planned cohort has a
+new run-level coverage record and both explicit flags are present:
+
+```bash
+python cli.py coverage-migration \
+  --delete-legacy-types \
+  --yes \
+  --confirm-delete-legacy-checkpoints
+```
+
+This calls Fulcra's custom annotation deletion/lifecycle operation for the
+legacy types listed above. Do not run it while an older application version is
+active. Keep the exported inventory/backup for rollback. If any cohort is
+missing, the command refuses deletion and instructs you to migrate first.

@@ -6,11 +6,12 @@ and volume/cost/performance metrics measurement for 1/2/3-year windows.
 """
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from checkpoint import Checkpoint, CheckpointManager
 from github_spike import GitHubActivityItem, GitHubAPISpike
+from history_coverage import HistoryCoverage, HistoryCoverageManager
 from raw_ingestion import RawActivityIngestor
 
 
@@ -53,7 +54,7 @@ class BackfillEngine:
     ) -> None:
         self.fulcra_client = fulcra_client
         self.github_api = github_api
-        self.checkpoint_manager = CheckpointManager(
+        self.coverage_manager = HistoryCoverageManager(
             fulcra_client, event_callback=event_callback
         )
         self.progress_callback = progress_callback or (lambda message: print(message, flush=True))
@@ -73,6 +74,8 @@ class BackfillEngine:
         kill_after_n_records: Optional[int] = None,
         repo_offset: int = 0,
         repos_total_override: Optional[int] = None,
+        run_id: Optional[str] = None,
+        raw_record_count_base: int = 0,
     ) -> Dict[str, Any]:
         """Run backfill for `github_identity` across specified date range and repos.
 
@@ -142,7 +145,7 @@ class BackfillEngine:
 
 
             # 2a: Calculate sub-ranges not yet covered by completed checkpoints
-            uncovered_ranges = self.checkpoint_manager.get_uncovered_ranges(
+            uncovered_ranges = self.coverage_manager.get_uncovered_ranges(
                 repo=repo,
                 github_identity=github_identity,
                 start_time=start_time,
@@ -173,16 +176,9 @@ class BackfillEngine:
                 )
 
                 if not precheck.get("has_activity"):
-                    # Mark subrange as completed with 0 items so future runs skip pre-check
-                    cp = Checkpoint(
-                        repo=repo,
-                        github_identity=github_identity,
-                        start_time=sub_start,
-                        end_time=sub_end,
-                        status="completed",
-                        items_processed=0,
-                    )
-                    self.checkpoint_manager.save_checkpoint(cp)
+                    # The completed run-level coverage snapshot durably
+                    # includes zero-activity repositories; no per-repo
+                    # duration is written here.
                     if repo not in repos_no_activity and repo not in repos_active:
                         repos_no_activity.append(repo)
                     self.progress_callback(
@@ -232,6 +228,27 @@ class BackfillEngine:
 
         elapsed_wall_time = time.perf_counter() - start_wall_time
         total_api_calls = self.github_api.api_call_count - start_api_calls
+
+        if not interrupted:
+            coverage_run_id = run_id or (
+                "standalone-"
+                + hashlib.sha256(
+                    (
+                        f"{github_identity}|{start_time}|{end_time}|"
+                        + "\n".join(sorted(repos))
+                    ).encode()
+                ).hexdigest()[:18]
+            )
+            self.coverage_manager.save(
+                HistoryCoverage(
+                    run_id=coverage_run_id,
+                    github_identity=github_identity,
+                    start_time=start_time,
+                    end_time=end_time,
+                    repositories=repos,
+                    raw_record_count=raw_record_count_base + total_records_ingested,
+                )
+            )
 
         result = {
             "github_identity": github_identity,

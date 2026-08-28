@@ -8,6 +8,7 @@ import pytest
 from backfill import BackfillEngine, calculate_date_window
 from checkpoint import Checkpoint, CheckpointManager
 from github_spike import GitHubActivityItem, GitHubAPISpike
+from history_coverage import HistoryCoverageManager
 from raw_ingestion import RawActivityIngestor
 from fulcra_client import get_fulcra_client
 
@@ -142,22 +143,14 @@ def test_backfill_engine_multi_repo(mock_fulcra_client) -> None:
     r3_items = ingestor.get_raw_activities(repo=repo3, github_identity=identity, start_time=start_time, end_time=end_time)
     assert len(r3_items) == 1
 
-    # Empty repositories still receive one semantically meaningful completed
-    # coverage duration, so future runs skip their precheck.
-    empty_coverage = [
-        Checkpoint.from_record(record, "coverage")
-        for record in mock_fulcra_client.duration_records
-        if repo2 in (record.get("note") or "")
-    ]
-    assert len(empty_coverage) == 1
-    assert empty_coverage[0].status == "completed"
-    assert empty_coverage[0].items_processed == 0
-    assert mock_fulcra_client.duration_records[
-        next(
-            index for index, record in enumerate(mock_fulcra_client.duration_records)
-            if repo2 in (record.get("note") or "")
-        )
-    ]["recorded_at"] == {"start_time": start_time, "end_time": end_time}
+    # One run-level duration covers the complete repository snapshot,
+    # including the zero-activity repository, without per-repo bars.
+    coverage = HistoryCoverageManager(mock_fulcra_client).get_coverages(identity)
+    assert len(coverage) == 1
+    assert set(coverage[0].repositories) == {repo1, repo2, repo3}
+    assert coverage[0].start_time == start_time
+    assert coverage[0].end_time == end_time
+    assert len(mock_fulcra_client.duration_records) == 1
 
 
 def test_multi_repo_kill_and_resume(mock_fulcra_client) -> None:
@@ -209,12 +202,12 @@ def test_multi_repo_kill_and_resume(mock_fulcra_client) -> None:
     assert metrics1["interrupted"] is True
     assert metrics1["records_ingested"] == 2
 
-    # Verify repo 1 is in progress
-    cp_mgr = CheckpointManager(mock_fulcra_client)
-    cp1 = cp_mgr.get_latest_checkpoint(repo1, identity, start_time, end_time)
-    assert cp1 is not None
-    assert cp1.status == "in_progress"
-    assert cp1.cursor == "r1_c_2"
+    # No per-repository progress or coverage type is written. Raw
+    # fingerprints are sufficient to replay the interrupted repository.
+    annotation_names = {item["name"] for item in mock_fulcra_client.annotations}
+    assert "GitHub Backfill Progress" not in annotation_names
+    assert "GitHub Backfill Coverage" not in annotation_names
+    assert HistoryCoverageManager(mock_fulcra_client).get_coverages(identity) == []
 
     # Process 2: Fresh session/engine instance resumes from checkpoint
     engine2 = BackfillEngine(mock_fulcra_client, mock_gh)
@@ -229,11 +222,9 @@ def test_multi_repo_kill_and_resume(mock_fulcra_client) -> None:
     # Newly ingested in process 2 should be 1 item for repo 1 + 3 items for repo 2 = 4 items
     assert metrics2["records_ingested"] == 4
 
-    # Check that repo 1 and repo 2 are completed
-    cp1_final = cp_mgr.get_latest_checkpoint(repo1, identity, start_time, end_time)
-    cp2_final = cp_mgr.get_latest_checkpoint(repo2, identity, start_time, end_time)
-    assert cp1_final.status == "completed"
-    assert cp2_final.status == "completed"
+    coverage = HistoryCoverageManager(mock_fulcra_client).get_coverages(identity)
+    assert len(coverage) == 1
+    assert coverage[0].repositories == [repo1, repo2]
 
     # Verify all records exist in Fulcra without duplicates
     ingestor = RawActivityIngestor(mock_fulcra_client)

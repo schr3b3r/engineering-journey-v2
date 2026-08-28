@@ -32,6 +32,14 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Canonical ingestion now writes one `GitHub History Coverage` duration per
+completed run/window and complete repository snapshot. `Engineering Journey
+Run` moments are the only operational progress state. Raw fingerprints handle
+replay inside an interrupted repository, so no canonical per-repo coverage or
+cursor progress records are written. Timeline cardinality scales with meaningful
+ingestion windows rather than repository count. Legacy per-repo types are
+read-only until explicitly migrated and separately confirmed for deletion.
+
 Agent-facing monitoring is now explicit rather than aspirational:
 `progress-status` turns JSONL into one relay-ready status line, and SKILL.md
 forbids waits over 15 seconds or consecutive monitoring tool batches without a
@@ -70,14 +78,6 @@ contains the exact activity start/end dates and UTC writing date. CLI output
 prints both the local path and Fulcra path; upload errors fail clearly rather
 than leaving the user to ask an agent to save the artifact afterward.
 
-Issue #9 temporal checkpoint redesign: new writes separate completed
-`GitHub Backfill Coverage` durations (source-time repository/subrange windows)
-from bounded `GitHub Backfill Progress` moments (actual operational update
-time). Progress defaults to one milestone per 100 new raw records. Durable raw
-item IDs make replay idempotent if a hard crash lands between milestones.
-Readers include legacy checkpoint records, but no new legacy records are
-created. Cleanup is inventory-only in app code and requires separate owner
-confirmation; see `features/checkpoint_migration.md`.
 
 Issues #5-#7 quality/correctness release: rollups now durably retain a bounded
 semantic evidence projection from raw GitHub records, and period prompts use
@@ -103,6 +103,8 @@ yet started. Consult both, but don't duplicate one into the other.
 ## Decisions Log
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
+
+- **(post-#17 temporal simplification)** One completed immutable run equals one `GitHub History Coverage` source-time bar whose repository snapshot includes active and zero-activity repos. `Engineering Journey Run` is the sole canonical operational state. Per-repo coverage/progress types are retired to migration compatibility, reducing Timeline bars from O(repositories) to O(completed windows).
 
 - **(post-#13 progress UX correction)** Structured events alone do not inform a user when an agent consumes them silently. `progress-status` provides deterministic summarization, while the skill mandates alternating monitor-tool cycles with actual commentary and caps waits at 15 seconds.
 - **(issue #13 on raw-history architecture)** Reliability is concentrated in four small pieces: `reliability.py` retry classification/backoff, `progress.py` JSONL events/timings, `pipeline_run.py` durable immutable stage state, and raw fingerprint ambiguity checks. Rollup/notability recovery was deliberately not rebuilt because those records are retired from canonical mode.

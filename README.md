@@ -19,8 +19,9 @@ External-provider mode remains an explicit standalone alternative only.
 
 Durable Fulcra records include:
 
-- `GitHub Backfill Coverage` source-time durations;
-- `GitHub Backfill Progress` operational moments;
+- `GitHub History Coverage`: one source-time duration per completed run/window
+  and repository snapshot;
+- `Engineering Journey Run`: bounded operational stage/repository moments;
 - `GitHub Activity Raw` title/body evidence with exact record IDs and GitHub URLs.
 
 Rollups, notability scores, and LLM summaries are not required or persisted by

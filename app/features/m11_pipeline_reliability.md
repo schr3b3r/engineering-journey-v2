@@ -18,7 +18,7 @@ Retry-safe, observable, stage-resumable execution for the canonical raw-history 
 - [x] Skill orchestration caps waits at 15 seconds and requires a user-visible natural-language update between every monitoring tool cycle.
 - [x] Transient DNS/network/429/5xx Fulcra operations use bounded exponential backoff and jitter with retry events.
 - [x] Raw records have deterministic source fingerprints. Ambiguous committed-but-response-lost writes are re-queried before retry and do not duplicate.
-- [x] Coverage/progress, run-state, raw query/write, and final artifact upload paths use retry handling.
+- [x] History coverage, run-state, raw query/write, and final artifact upload paths use retry handling.
 - [x] Integration-style tests interrupt raw ingestion, resume without rediscovery, resume after `raw_complete` with GitHub unavailable, retain the exact window, avoid duplicates, build the handoff, and publish.
 - [x] Retired rollup/notability persistence is not part of canonical recovery.
 - [x] Full pytest suite passes.

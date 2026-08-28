@@ -14,7 +14,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from checkpoint import (
     DEFAULT_PROGRESS_INTERVAL,
     Checkpoint,
-    CheckpointManager,
     format_tag,
 )
 from github_spike import GitHubActivityItem
@@ -93,7 +92,6 @@ class RawActivityIngestor:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.client = client
-        self.checkpoint_manager = CheckpointManager(client, event_callback=event_callback)
         self.progress_interval = max(1, progress_interval)
         self.progress_callback = progress_callback
         self.event_callback = event_callback
@@ -180,41 +178,9 @@ class RawActivityIngestor:
             or f"com.fulcradynamics.annotation.{type_id}"
         )
 
-        latest_cp = self.checkpoint_manager.get_latest_checkpoint(
-            repo=repo,
-            github_identity=github_identity,
-            start_time=start_time,
-            end_time=end_time,
-        )
-
-        # BUG FIX (found via a real kill/resume run against a live GitHub
-        # account, M4): get_latest_checkpoint's start_time/end_time args
-        # only bound the *query* window used to look up checkpoint
-        # records -- they do NOT guarantee the returned checkpoint's own
-        # covered range actually matches the range being requested here.
-        # A checkpoint from an earlier, wider (or otherwise different)
-        # real backfill run for the same repo+identity was being reused
-        # as if it applied to this call's specific start_time/end_time,
-        # causing ingest_items to wrongly short-circuit to "0 ingested,
-        # already completed" for a range that was never actually
-        # processed. Only trust a "completed" checkpoint here if its own
-        # stored range genuinely covers the requested range -- the same
-        # check CheckpointManager.is_range_covered() already implements
-        # correctly; reuse that logic rather than trusting whatever
-        # get_latest_checkpoint happened to return.
-        if latest_cp and latest_cp.status == "completed":
-            covers_requested_range = (
-                latest_cp.start_time <= start_time and latest_cp.end_time >= end_time
-            )
-            if covers_requested_range:
-                return 0, latest_cp
-            # Not actually a match for this request -- treat as no prior
-            # checkpoint for this specific range rather than as "done."
-            latest_cp = None
-
-        # Raw records are the idempotency authority between bounded progress
-        # milestones. If a process dies after writing raw data but before the
-        # next progress moment, replay sees and skips those durable item IDs.
+        # Raw records are the idempotency authority. A replay safely scans the
+        # current repository and skips durable fingerprints, so no separate
+        # per-repository cursor record is needed.
         existing_items = self.get_raw_activities(
             repo=repo,
             github_identity=github_identity,
@@ -223,14 +189,8 @@ class RawActivityIngestor:
         )
         existing_fingerprints = {activity_fingerprint(item) for item in existing_items}
 
-        last_cursor = latest_cp.cursor if latest_cp and latest_cp.status != "completed" else None
-        start_idx = 0
-        if last_cursor is not None:
-            start_idx = next(
-                (idx + 1 for idx, item in enumerate(items) if str(item.item_id) == str(last_cursor)),
-                0,
-            )
-        remaining_items = items[start_idx:]
+        latest_cp: Optional[Checkpoint] = None
+        remaining_items = items
         newly_processed = 0
         examined = 0
         last_examined: Optional[GitHubActivityItem] = None
@@ -330,12 +290,11 @@ class RawActivityIngestor:
                     cursor=item.item_id,
                     items_processed=len(existing_fingerprints),
                 )
-                self.checkpoint_manager.save_checkpoint(latest_cp)
 
         interrupted = kill_after_n is not None and examined < len(remaining_items)
         if interrupted and last_examined is not None:
-            # Graceful shutdown gets a final bounded progress moment. A hard
-            # kill relies on existing_ids replay protection instead.
+            # Return an in-memory status for callers. Durable resume is the
+            # run milestone plus raw fingerprints, not a second progress type.
             latest_cp = Checkpoint(
                 repo=repo,
                 github_identity=github_identity,
@@ -345,7 +304,7 @@ class RawActivityIngestor:
                 cursor=last_examined.item_id,
                 items_processed=len(existing_fingerprints),
             )
-            self.checkpoint_manager.save_checkpoint(latest_cp)
+
         elif all(activity_fingerprint(item) in existing_fingerprints for item in items):
             cp = Checkpoint(
                 repo=repo,
@@ -356,7 +315,6 @@ class RawActivityIngestor:
                 cursor=items[-1].item_id if items else None,
                 items_processed=len(existing_fingerprints),
             )
-            self.checkpoint_manager.save_checkpoint(cp)
             latest_cp = cp
 
         if self.progress_callback:
