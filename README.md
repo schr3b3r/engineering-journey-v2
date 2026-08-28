@@ -30,18 +30,28 @@ Ingest a user-provided span of a developer's GitHub activity (from their own aut
 1. Check Authentication:
    ```bash
    cd app
-   python cli.py auth --yes
+   python cli.py auth
    ```
 
 2. Run Full Pipeline (Backfill -> Rollups -> Notability -> Summarization -> Narrative):
    ```bash
-   python cli.py pipeline --years 1.0 --yes
+   python cli.py pipeline --years 1.0
    ```
+   Before any backfill work, the CLI confirms the active GitHub account and
+   displays the exact UTC date range, repository scope, write mode, and stages.
+   The safe default is to cancel. During execution it continuously prints
+   contextual progress through repository checks, ingestion, synthesis, and
+   Fulcra upload.
+
+   In a non-interactive agent shell, the first run prints the account and plan
+   and exits without doing work. The agent must show both to the user and ask
+   for approval; only then should it rerun with `--yes`. Use `--device-code`
+   instead if the user chooses a different GitHub account.
 
 3. Individual CLI Commands (still from inside `app/`):
    ```bash
    # Raw Ingestion
-   python cli.py backfill --years 1.0 --yes
+   python cli.py backfill --years 1.0
 
    # Precompute Rollups & Notability Signals
    python cli.py rollup --years 1.0

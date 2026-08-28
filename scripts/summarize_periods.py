@@ -192,7 +192,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n--- Generating real period summaries via provider={args.provider or 'auto'} ---")
     summary_provider_fn = make_summary_provider_fn(args.provider)
     updated = summarizer.summarize_periods_and_write_back(
-        synthesis_rollups, summary_provider_fn=summary_provider_fn, save_to_fulcra=True,
+        synthesis_rollups,
+        summary_provider_fn=summary_provider_fn,
+        save_to_fulcra=True,
+        progress_callback=lambda message: print(message, flush=True),
     )
     print(f"Wrote back real summaries for {len(updated)} rollup records.")
     print(
