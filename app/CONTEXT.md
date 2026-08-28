@@ -32,6 +32,15 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
+Issue #9 temporal checkpoint redesign: new writes separate completed
+`GitHub Backfill Coverage` durations (source-time repository/subrange windows)
+from bounded `GitHub Backfill Progress` moments (actual operational update
+time). Progress defaults to one milestone per 100 new raw records. Durable raw
+item IDs make replay idempotent if a hard crash lands between milestones.
+Readers include legacy checkpoint records, but no new legacy records are
+created. Cleanup is inventory-only in app code and requires separate owner
+confirmation; see `features/checkpoint_migration.md`.
+
 Issues #5-#7 quality/correctness release: rollups now durably retain a bounded
 semantic evidence projection from raw GitHub records, and period prompts use
 titles, body excerpts, repositories, activity types, and traceable `raw:` IDs.
@@ -78,6 +87,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
+- **(issue #9)** Coverage/progress temporal split: completed windows belong in `GitHub Backfill Coverage` DurationAnnotations at source time; bounded cursors belong in `GitHub Backfill Progress` MomentAnnotations at update time. Raw-item existence makes replay idempotent between 100-item milestones. Legacy reads are transitional and cleanup is explicitly non-destructive until separately owner-confirmed.
 - **(issues #5-#7)** Grounded hierarchical narrative synthesis and fail-closed provenance: `ActivityRollup.evidence_items` preserves a bounded semantic projection with raw lineage; old records can be hydrated from durable raw Fulcra items; model prompts use this evidence and forbid unsupported connections. Month summaries provide pacing while quarter/year summaries provide trajectory. Limited mode is explicitly non-equivalent and compact. Appendix parsing is table-structural (UUID-safe) with exact-set validation. The model provider preflight happens before pipeline backfill while retaining `--skip-real-summarization` as an explicit limited-mode opt-in.
 - **(post-M10)** Cross-Repo Period Summarization (`summarization.py`'s `group_rollups_by_period`/`build_period_summarization_prompt`/`summarize_periods_and_write_back`, new `scripts/summarize_periods.py`, ported `harness/providers/` multi-provider adapters): fixed a real quality gap where `narrative` output was a flat, templated data dump instead of connected prose, because `summarize` never actually called a model or wrote anything back. The fix keeps `app/`'s zero-LLM-SDK constraint intact by putting the real model call in harness-side tooling (`scripts/summarize_periods.py`, which imports both `app/`'s data layer and `harness/providers/`), not in `app/cli.py`. Grouping is cross-repo per period window (matching how a genuinely good narrative reads -- one paragraph per quarter spanning every active repo, not one per single-repo rollup). `narrative.py` deduplicates by (period bounds, shared summary_text) to render the consolidated paragraph, falling back honestly when no real summary was written back for a period.
 - **(M10)** Skill Packaging & Standalone CLI (`cli.py`, `main.py`, `github_auth.py`, `SKILL.md`): Standalone CLI with zero hard agent dependencies supporting `auth`, `backfill`, `rollup`, `summarize`, `narrative`, and end-to-end `pipeline`. GitHub auth defaults to browser OAuth device-code flow (RFC 8628) and explicitly prompts user for confirmation when existing `gh` session or `GITHUB_TOKEN` is detected. Shipped root-level `SKILL.md` and `README.md` for fresh agent or developer usage.

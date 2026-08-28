@@ -1,11 +1,15 @@
-"""Tests for GitHub Backfill Checkpoint functionality."""
+"""Tests for GitHub backfill coverage and progress functionality."""
 
+import os
+from datetime import datetime, timezone
 import pytest
 from checkpoint import (
     CHECKPOINT_ANNOTATION_NAME,
+    LEGACY_CHECKPOINT_ANNOTATION_NAME,
     Checkpoint,
     CheckpointManager,
     FakeWorkItemProcessor,
+    format_iso,
     format_tag,
 )
 from fulcra_client import get_fulcra_client
@@ -103,6 +107,63 @@ def test_save_and_get_checkpoint(mock_fulcra_client) -> None:
     assert loaded.cursor == "commit_sha_123"
     assert loaded.items_processed == 10
     assert loaded.status == "in_progress"
+
+
+def test_temporal_shape_separates_progress_moments_from_coverage_durations(mock_fulcra_client) -> None:
+    mgr = CheckpointManager(mock_fulcra_client)
+    progress = Checkpoint(
+        "acme/widget", "dev", "2025-01-01T00:00:00Z", "2025-06-30T23:59:59Z",
+        "in_progress", "cursor-10", 10,
+    )
+    mgr.save_checkpoint(progress)
+    assert len(mock_fulcra_client.moment_records) == 1
+    assert len(mock_fulcra_client.duration_records) == 0
+    moment = mock_fulcra_client.moment_records[0]
+    note = __import__("json").loads(moment["note"])
+    assert isinstance(moment["recorded_at"], str)
+    assert moment["recorded_at"] == note["updated_at"]
+    assert note["record_kind"] == "progress"
+
+    completed = Checkpoint(
+        "acme/widget", "dev", progress.start_time, progress.end_time,
+        "completed", "cursor-10", 10,
+    )
+    mgr.save_checkpoint(completed)
+    assert len(mock_fulcra_client.duration_records) == 1
+    duration = mock_fulcra_client.duration_records[0]
+    assert duration["recorded_at"] == {
+        "start_time": progress.start_time, "end_time": progress.end_time,
+    }
+    assert __import__("json").loads(duration["note"])["record_kind"] == "coverage"
+    assert len(mock_fulcra_client.duration_annotations(
+        "2025-03-01T00:00:00Z", "2025-03-01T23:59:59Z"
+    )) == 1
+    assert mock_fulcra_client.moment_annotations(
+        "2025-03-01T00:00:00Z", "2025-03-01T23:59:59Z"
+    ) == []
+
+
+def test_legacy_checkpoint_read_and_cleanup_plan_are_non_destructive(mock_fulcra_client) -> None:
+    legacy = mock_fulcra_client.create_annotation(
+        "duration", LEGACY_CHECKPOINT_ANNOTATION_NAME, "legacy", []
+    )
+    cp = Checkpoint(
+        "legacy/repo", "dev", "2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z",
+        "in_progress", "old-cursor", 42,
+    )
+    mock_fulcra_client.record_data_type("DurationAnnotation", [{
+        "recorded_at": {"start_time": cp.start_time, "end_time": cp.end_time},
+        "tags": [], "sources": [legacy["fulcra_source_id"]], "note": cp.to_note_json(),
+    }])
+    mgr = CheckpointManager(mock_fulcra_client)
+    loaded = mgr.get_latest_checkpoint("legacy/repo", "dev")
+    assert loaded is not None and loaded.cursor == "old-cursor"
+    assert loaded.record_kind == "legacy"
+    plan = mgr.plan_legacy_cleanup()
+    assert plan["record_count"] == 1
+    assert plan["obsolete_progress_candidates"] == 1
+    assert plan["destructive_action_taken"] is False
+    assert len(mock_fulcra_client.duration_records) == 1
 
 
 def test_kill_and_resume_simulation(mock_fulcra_client) -> None:
@@ -221,6 +282,42 @@ def test_real_fulcra_integration() -> None:
 
     save_resp = mgr.save_checkpoint(cp)
     assert "upload_id" in save_resp
+
+
+@pytest.mark.skipif(
+    not os.environ.get("RUN_LIVE_TESTS"),
+    reason="RUN_LIVE_TESTS=1 not set for live Fulcra temporal-shape test",
+)
+def test_live_fulcra_checkpoint_temporal_shape() -> None:
+    """Inspect real backend records, not reconstructed manager objects."""
+    client = get_fulcra_client()
+    mgr = CheckpointManager(client)
+    suffix = format_iso(datetime.now(timezone.utc))
+    repo = f"integration/checkpoint-shape-{suffix}"
+    identity = "checkpoint-shape-test"
+    start, end = "2025-04-01T00:00:00Z", "2025-04-30T23:59:59Z"
+    mgr.save_checkpoint(Checkpoint(repo, identity, start, end, "in_progress", "c1", 1))
+    mgr.save_checkpoint(Checkpoint(repo, identity, start, end, "completed", "c1", 1))
+
+    progress_info = mgr.ensure_progress_data_type()
+    coverage_info = mgr.ensure_data_type()
+    progress_records = client.moment_annotations(
+        start_time="2000-01-01T00:00:00Z", end_time="2100-01-01T00:00:00Z",
+        source=mgr._source_id(progress_info),
+    )
+    coverage_records = client.duration_annotations(
+        start_time=start, end_time=end, source=mgr._source_id(coverage_info),
+    )
+    matching_progress = [
+        record for record in progress_records if repo in (record.get("note") or "")
+    ]
+    matching_coverage = [
+        record for record in coverage_records if repo in (record.get("note") or "")
+    ]
+    assert len(matching_progress) == 1
+    assert len(matching_coverage) == 1
+    assert isinstance(matching_progress[0]["recorded_at"], str)
+    assert matching_coverage[0]["recorded_at"] == {"start_time": start, "end_time": end}
 
 
 def test_save_checkpoint_waits_for_completed_checkpoint_visibility(mock_fulcra_client) -> None:

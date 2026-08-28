@@ -337,6 +337,74 @@ def test_ingest_items_does_not_treat_unrelated_range_checkpoint_as_covering(mock
     ]
     count2, cp2 = ingestor.ingest_items(second_items, repo, identity, second_start, second_end)
 
-    assert count2 == 2
+    # The overlapping item is already durable and replayed idempotently;
+    # only the newly uncovered item is written again.
+    assert count2 == 1
     assert cp2.start_time == second_start
     assert cp2.end_time == second_end
+
+
+def test_progress_record_count_is_bounded_by_milestones(mock_fulcra_client) -> None:
+    repo, identity = "acme/large", "bounded-dev"
+    items = [
+        GitHubActivityItem(
+            "commit", repo, identity, f"sha-{index}",
+            f"2025-01-{(index % 28) + 1:02d}T00:00:00Z", f"commit {index}", "",
+        )
+        for index in range(250)
+    ]
+    ingestor = RawActivityIngestor(mock_fulcra_client, progress_interval=100)
+    count, completed = ingestor.ingest_items(
+        items, repo, identity, "2025-01-01T00:00:00Z", "2025-01-31T23:59:59Z"
+    )
+    assert count == 250 and completed is not None and completed.status == "completed"
+    progress_source = next(
+        annotation["fulcra_source_id"] for annotation in mock_fulcra_client.annotations
+        if annotation["name"] == "GitHub Backfill Progress"
+    )
+    progress_records = [
+        record for record in mock_fulcra_client.moment_records
+        if progress_source in record.get("sources", [])
+    ]
+    assert len(progress_records) == 2
+    assert len(mock_fulcra_client.duration_records) == 1
+    assert len(progress_records) < len(items) / 10
+
+
+def test_replay_after_progress_loss_does_not_duplicate_raw_records(mock_fulcra_client) -> None:
+    repo, identity = "acme/crash", "crash-dev"
+    items = [
+        GitHubActivityItem(
+            "commit", repo, identity, f"sha-{index}",
+            f"2025-02-{index + 1:02d}T00:00:00Z", f"commit {index}", "",
+        )
+        for index in range(10)
+    ]
+    ingestor = RawActivityIngestor(mock_fulcra_client, progress_interval=100)
+    first_count, _ = ingestor.ingest_items(
+        items, repo, identity, "2025-02-01T00:00:00Z", "2025-02-28T23:59:59Z",
+        kill_after_n=5,
+    )
+    assert first_count == 5
+    # Simulate a hard crash where the last progress write was unavailable,
+    # while its five raw writes remained durable.
+    progress_source = next(
+        annotation["fulcra_source_id"] for annotation in mock_fulcra_client.annotations
+        if annotation["name"] == "GitHub Backfill Progress"
+    )
+    mock_fulcra_client.moment_records = [
+        record for record in mock_fulcra_client.moment_records
+        if progress_source not in record.get("sources", [])
+    ]
+    second_count, completed = RawActivityIngestor(
+        mock_fulcra_client, progress_interval=100
+    ).ingest_items(
+        items, repo, identity, "2025-02-01T00:00:00Z", "2025-02-28T23:59:59Z"
+    )
+    assert second_count == 5
+    assert completed is not None and completed.status == "completed"
+    raw_ids = [activity.item_id for activity in RawActivityIngestor(
+        mock_fulcra_client
+    ).get_raw_activities(repo=repo, github_identity=identity)]
+    assert len(raw_ids) == 10
+    assert len(set(raw_ids)) == 10
