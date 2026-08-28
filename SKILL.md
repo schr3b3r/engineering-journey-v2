@@ -21,6 +21,16 @@ records, bounded evidence retrieval, validation, provenance, and publishing.
 - Do not create or require Activity Rollup, Notability Signal, or persisted LLM
   summary records in normal skill mode. Interpretation is ephemeral.
 
+Canonical ingestion has only three durable concepts:
+
+- `GitHub Activity Raw`: source facts.
+- `Engineering Journey Run`: bounded operational moments for stage/resume state.
+- `GitHub History Coverage`: one source-time duration per completed run/window
+  and full repository snapshot—not one duration per repository.
+
+Do not write `GitHub Backfill Coverage`, `GitHub Backfill Progress`, or
+`GitHub Backfill Checkpoint`; those names are read-only legacy migration data.
+
 ## Runtime bootstrap
 
 A Hermes direct URL install bundles `SKILL.md` and referenced support files,
@@ -233,6 +243,32 @@ $PYTHON cli.py agent-handoff \
 ```
 
 Then repeat the author-and-publish steps.
+
+### Legacy Timeline cleanup (never automatic)
+
+If an existing account has old overlapping per-repository coverage/progress
+records, first inspect the non-destructive plan:
+
+```bash
+$PYTHON cli.py coverage-migration --plan
+```
+
+After the user reviews it, create idempotent run-level coverage cohorts without
+deleting anything:
+
+```bash
+$PYTHON cli.py coverage-migration --migrate --yes
+```
+
+Only if the user separately asks to remove the old Timeline types, after
+verifying every cohort, run the explicitly destructive command:
+
+```bash
+$PYTHON cli.py coverage-migration --delete-legacy-types --yes \
+  --confirm-delete-legacy-checkpoints
+```
+
+Never infer cleanup approval from migration approval.
 
 ## Explicit standalone alternatives
 

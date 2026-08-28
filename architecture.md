@@ -254,26 +254,29 @@ scalar-shaped, so they stay on their original base types too.)
   a genuine case for using both together rather than treating them as
   mutually exclusive.
 
-### 4. GitHub backfill coverage and progress
+### 4. GitHub history coverage and operational run state
 
-Issue #9 supersedes the original all-in-one `GitHub Backfill Checkpoint`
-design while retaining it as a read-only legacy format.
+The canonical ingestion ledger uses one temporal concept for each job:
 
-- **`GitHub Backfill Coverage` (`DurationAnnotation`):** one completed
-  repository/subrange marker. `recorded_at.start_time/end_time` is the actual
-  historical source window that was checked, including zero-activity windows.
-  Tags identify repository, GitHub identity, and completed status.
-- **`GitHub Backfill Progress` (`MomentAnnotation`):** bounded operational
-  cursor milestones. `recorded_at` is the actual update instant; the requested
-  source window, cursor, and item count remain descriptive fields in `note`.
-  The default milestone interval is 100 newly written raw records.
-- **Crash semantics:** durable raw item IDs are the idempotency authority. A
-  replay after a crash skips already-stored raw items, so a crash between
-  milestones creates neither omissions nor duplicates.
-- **Legacy transition:** readers merge the old duration records with the two
-  new types, but writers never create more legacy records. Cleanup begins with
-  a non-destructive inventory and requires a separately confirmed owner action
-  after equivalent coverage is verified.
+- **`GitHub History Coverage` (`DurationAnnotation`):** one completed source-time
+  interval per immutable run/window, not per repository. Its note links the
+  `run_id` and complete repository snapshot/list/hash/count, including
+  zero-activity repositories. A Timeline query therefore returns one meaningful
+  bar for a 313-repository run rather than 313 overlapping bars.
+- **`Engineering Journey Run` (`MomentAnnotation`):** bounded operational stage
+  and repository milestones at their actual update times. This is the only
+  canonical progress/resume state.
+- **Crash semantics:** stable raw fingerprints are the in-repository resume
+  authority. Replaying an interrupted repository safely skips durable raw
+  records, so a separate cursor annotation type is unnecessary.
+- **Gap semantics:** a repository is covered only when it belongs to a completed
+  run snapshot whose interval covers the request. Newly discovered repositories
+  remain uncovered; backward/forward runs create additional meaningful source-
+  time intervals.
+- **Legacy transition:** old per-repository `GitHub Backfill Coverage`, cursor
+  `GitHub Backfill Progress`, and combined `GitHub Backfill Checkpoint` records
+  are read-only compatibility inputs. Migration groups them into run-level
+  cohorts. Deletion is separate, explicit, and never automatic.
 
 ## Tenancy
 Single Fulcra account, single GitHub identity per ingestion run (per
