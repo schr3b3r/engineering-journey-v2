@@ -13,6 +13,10 @@ Markdown narrative generator that prompts for or accepts a target date range (fu
 - [x] Provenance Appendix explicitly lists all Activity Rollup record IDs, Notability Signal record IDs, and lower-level source references backing the document.
 - [x] Names output document deterministically according to the chosen range (e.g., `engineering_journey_2023_to_2025.md` or `engineering_journey_FULL.md`).
 - [x] End-to-end reading and validation function parses generated documents and verifies all provenance record IDs match source records.
+- [x] Structurally parses rollup/signal appendix tables (including live UUID IDs) and verifies exact completeness in both directions; missing or empty expected tables fail closed.
+- [x] Preserves overall requested header bounds across multi-period rendering and uses human-readable month/quarter headings.
+- [x] Starts with durable higher-level trajectory synthesis, keeps counts/record IDs subordinate to the appendix, caps turning points, and compresses unsummarized periods into clearly labelled limited transitions.
+- [x] Includes a side-by-side quality regression over one shared evidence window scoring specificity, chronology, cross-repo synthesis, pacing, repetition, and unsupported claims.
 - [x] Has automated tests (pytest) covering the above criteria, and the FULL test suite passes (not just this feature's own tests) — see `app/ENGINEERING_STANDARDS.md`.
 
 ## Dependencies

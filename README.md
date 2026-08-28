@@ -59,6 +59,11 @@ Ingest a user-provided span of a developer's GitHub activity (from their own aut
    cd app && python cli.py narrative --range full --output my_story.md
    ```
    This is what `pipeline` runs automatically by default (pass `--skip-real-summarization` to opt out).
+   The provider is now checked before pipeline backfill begins. The explicit
+   opt-out produces a prominently labelled limited deterministic report, not
+   an equivalent quality narrative. Summarization uses title/body evidence
+   already stored in Fulcra and persists that evidence projection on rollups,
+   so rewriting the story does not require another GitHub fetch.
 
 ---
 

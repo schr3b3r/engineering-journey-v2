@@ -242,10 +242,20 @@ def test_build_period_summarization_prompt_describes_all_repos() -> None:
         ActivityRollup(
             period_type="quarter", start_time=key[1], end_time=key[2],
             github_identity=identity, repo="acme/web", counts={"commit": 3}, total_activity_count=3,
+            evidence_items=[{
+                "source_id": "raw:acme/web:c1", "repo": "acme/web",
+                "activity_type": "commit", "title": "Migrate dashboard to React",
+                "body_excerpt": "Replace the legacy view layer", "timestamp": key[1], "url": "",
+            }],
         ),
         ActivityRollup(
             period_type="quarter", start_time=key[1], end_time=key[2],
             github_identity=identity, repo="acme/api", counts={"pr_merge": 1}, total_activity_count=1,
+            evidence_items=[{
+                "source_id": "raw:acme/api:p1", "repo": "acme/api",
+                "activity_type": "pr_merge", "title": "Add dashboard metrics endpoint",
+                "body_excerpt": "Supports the React dashboard", "timestamp": key[1], "url": "",
+            }],
         ),
     ]
     prompt = build_period_summarization_prompt(key, rollups)
@@ -256,6 +266,34 @@ def test_build_period_summarization_prompt_describes_all_repos() -> None:
     # Must ask for real prose, not a template/list, since that's the
     # exact failure mode this mechanism exists to fix.
     assert "not a template" in prompt
+    assert "Migrate dashboard to React" in prompt
+    assert "Add dashboard metrics endpoint" in prompt
+    assert "raw:acme/web:c1" in prompt
+    assert "Do not invent" in prompt
+
+
+def test_rollups_preserve_title_body_and_raw_provenance_as_durable_evidence(mock_fulcra_client) -> None:
+    item = GitHubActivityItem(
+        "pull_request_opened", "acme/payments", "evidence_dev", "pr42",
+        "2024-05-10T10:00:00Z", "Introduce idempotent payment capture",
+        "https://github.com/acme/payments/pull/42",
+        raw_payload={"body": "Adds an idempotency key and retry-safe state machine."},
+    )
+    engine = RollupEngine(mock_fulcra_client)
+    month = engine.generate_all_rollups(
+        [item], "evidence_dev", save_to_fulcra=True,
+    )["month"][0]
+    assert month.evidence_items[0]["title"] == "Introduce idempotent payment capture"
+    assert "retry-safe state machine" in month.evidence_items[0]["body_excerpt"]
+    assert month.evidence_items[0]["source_id"] == "raw:acme/payments:pr42"
+
+    stored = engine.get_rollups(github_identity="evidence_dev", period_type="month")[0]
+    assert stored.evidence_items == month.evidence_items
+    prompt = __import__("summarization").build_period_summarization_prompt(
+        (month.period_type, month.start_time, month.end_time), [stored]
+    )
+    assert "idempotent payment capture" in prompt
+    assert "retry-safe state machine" in prompt
 
 
 def test_summarize_periods_and_write_back_persists_one_summary_per_period(mock_fulcra_client) -> None:

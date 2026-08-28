@@ -127,17 +127,17 @@ this from the **repo root**, not `app/`:
 ```bash
 python scripts/summarize_periods.py --identity <username> --years 1.0
 ```
-This groups rollups by period window ACROSS repositories (e.g. all of a
-developer's activity in Q2 2024, spanning every repo active that
-quarter) and asks the model for ONE connected narrative paragraph per
-period -- this is what makes the eventual narrative document read as a
-real story instead of one templated sentence per single-repo rollup.
+This groups month/quarter/year rollups by period window ACROSS repositories
+and gives the model grounded titles, body excerpts, and traceable raw source
+IDs—not merely repository names and counts. Legacy rollups are rehydrated from
+durable Fulcra raw records, so no GitHub refetch is needed solely to rewrite
+the story. The hierarchy provides both period detail and trajectory synthesis.
 Pass `--provider anthropic|gemini|openai` to force a specific provider,
 or `--dry-run` to see how many period groups would be summarized
 without calling a model.
 
 #### 5. Markdown Narrative Generation
-Generates a paced narrative story document with a Provenance Appendix for a specified range ("full", "1y", "2024", etc.). If step 4b was run first, periods with a real written-back summary render as one consolidated cross-repo paragraph; any period without one still renders honestly (per-repo, using the deterministic fallback), rather than silently claiming a synthesis that didn't happen:
+Generates a paced narrative story document with a Provenance Appendix for a specified range ("full", "1y", "2024", etc.). If step 4b was run first, periods with a real written-back summary render as one consolidated cross-repo paragraph. Without those summaries, output is compact and prominently labelled as a limited deterministic fallback—not presented as an equivalent narrative:
 ```bash
 python cli.py narrative --range full --identity <username> --output my_story.md
 ```
@@ -146,7 +146,9 @@ python cli.py narrative --range full --identity <username> --output my_story.md
 ```bash
 python cli.py pipeline --years 1.0 --yes
 ```
-Pass `--skip-real-summarization` to skip the real model call (falls back to templated per-repo summaries) if no provider credentials are configured, or `--provider anthropic|gemini|openai` to force one.
+The pipeline checks model credentials before starting a long backfill. Pass
+`--skip-real-summarization` only to explicitly accept limited fallback output,
+or `--provider anthropic|gemini|openai` to force one.
 
 ---
 

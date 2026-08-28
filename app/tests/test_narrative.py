@@ -169,16 +169,16 @@ def test_paced_narrative_renders_one_cross_repo_paragraph_when_summaries_match()
 
     # Exactly one consolidated heading for the period, not two per-repo
     # "### Period: ..." headings.
-    assert paced_section.count("### 2024-04-01 to 2024-04-30 (month)") == 1
+    assert paced_section.count("### April 2024") == 1
     assert "### Period: 2024-04-01" not in paced_section
     assert shared_summary in paced_section
     # Only ONE copy of the shared summary text should appear (not
     # duplicated once per repo).
     assert paced_section.count(shared_summary) == 1
-    assert "`octocat/web`" in paced_section
-    assert "`octocat/api`" in paced_section
-    assert "`rollup_web_001`" in paced_section
-    assert "`rollup_api_001`" in paced_section
+    # Counts, record IDs, and repo key/value fields stay in provenance rather
+    # than interrupting the technical story.
+    assert "Total Activity Across Repos" not in paced_section
+    assert "Source Rollup Records" not in paced_section
 
 
 def test_paced_narrative_falls_back_to_per_repo_when_no_shared_summary() -> None:
@@ -211,10 +211,68 @@ def test_paced_narrative_falls_back_to_per_repo_when_no_shared_summary() -> None
     end = doc.find("---", start)
     paced_section = doc[start:end]
 
-    # Falls back to two separate per-repo period sections.
-    assert paced_section.count("### Period: 2024-04-01 to 2024-04-30 (`octocat/web`)") == 1
-    assert paced_section.count("### Period: 2024-04-01 to 2024-04-30 (`octocat/api`)") == 1
-    assert "### 2024-04-01 to 2024-04-30 (month)" not in paced_section
+    # Limited mode compresses the whole period rather than multiplying a
+    # template by repository.
+    assert paced_section.count("### Transition: April 2024") == 1
+    assert "Activity Count" not in paced_section
+    assert "Record ID" not in paced_section
+    assert "Limited deterministic fallback" in doc
+
+
+def test_header_preserves_overall_range_across_multiple_months() -> None:
+    rollups = [
+        ActivityRollup(
+            period_type="month", start_time="2024-01-01T00:00:00Z",
+            end_time="2024-01-31T23:59:59Z", github_identity="octocat",
+            repo="acme/api", total_activity_count=1, summary_text="January work.",
+        ),
+        ActivityRollup(
+            period_type="month", start_time="2024-02-01T00:00:00Z",
+            end_time="2024-02-29T23:59:59Z", github_identity="octocat",
+            repo="acme/api", total_activity_count=1, summary_text="February work.",
+        ),
+    ]
+    doc = format_narrative_document(
+        "octocat", "custom", "2024-01-10T00:00:00Z",
+        "2024-02-20T23:59:59Z", rollups, [],
+    )
+    assert "**Range:** custom (`2024-01-10` to `2024-02-20`)" in doc
+
+
+def test_uuid_provenance_is_structural_complete_and_non_vacuous() -> None:
+    rollup_uuid = "e48d6614-b6ad-5546-af3d-ea8469dcaf0e"
+    signal_uuid = "2bc58c53-dd3f-41df-9d41-f81282f799f1"
+    rollup = ActivityRollup(
+        period_type="month", start_time="2024-01-01T00:00:00Z",
+        end_time="2024-01-31T23:59:59Z", github_identity="octocat",
+        repo="acme/api", total_activity_count=1, record_id=rollup_uuid,
+    )
+    signal = NotabilitySignal(
+        period_type="month", start_time=rollup.start_time, end_time=rollup.end_time,
+        github_identity="octocat", repo="acme/api", score=70,
+        raw_activity_count=1, record_id=signal_uuid,
+    )
+    doc = format_narrative_document(
+        "octocat", "year_2024", rollup.start_time, rollup.end_time,
+        [rollup], [signal],
+    )
+    parsed = parse_narrative_document(doc)
+    assert parsed.rollup_record_ids == [rollup_uuid]
+    assert parsed.signal_record_ids == [signal_uuid]
+    assert verify_narrative_provenance(doc, [rollup], [signal])
+
+    missing_rollup_row = "\n".join(
+        line for line in doc.splitlines() if rollup_uuid not in line
+    )
+    assert not verify_narrative_provenance(missing_rollup_row, [rollup], [signal])
+
+    wrong_uuid = doc.replace(signal_uuid, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    assert not verify_narrative_provenance(wrong_uuid, [rollup], [signal])
+
+    no_tables = doc.replace("### Activity Rollup Records", "### Missing Rollups").replace(
+        "### Notability Signal Records", "### Missing Signals"
+    )
+    assert not verify_narrative_provenance(no_tables, [rollup], [signal])
 
 
 def test_narrative_generator_end_to_end_mock(mock_fulcra_client: MockFulcraClient) -> None:
