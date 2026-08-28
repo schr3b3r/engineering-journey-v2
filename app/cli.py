@@ -25,6 +25,7 @@ from github_auth import (
     get_token_identity,
 )
 from github_spike import GitHubAPISpike
+from history_coverage import HistoryCoverageManager
 from narrative import NarrativeGenerator, NarrativeUploadError
 from notability import NotabilityEngine
 from raw_ingestion import RawActivityIngestor
@@ -113,8 +114,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Print snapshot JSON instead of prose."
     )
 
+    migration_parser = subparsers.add_parser(
+        "coverage-migration",
+        help="Plan, migrate, or explicitly remove legacy per-repo checkpoint types.",
+    )
+    migration_actions = migration_parser.add_mutually_exclusive_group(required=True)
+    migration_actions.add_argument("--plan", action="store_true")
+    migration_actions.add_argument("--migrate", action="store_true")
+    migration_actions.add_argument("--delete-legacy-types", action="store_true")
+    migration_parser.add_argument("--yes", action="store_true")
+    migration_parser.add_argument(
+        "--confirm-delete-legacy-checkpoints",
+        action="store_true",
+        help="Separate destructive confirmation required with --delete-legacy-types.",
+    )
+
     # 6. PIPELINE / RUN-ALL command
-    pipeline_parser = subparsers.add_parser("pipeline", aliases=["run-all"], help="Execute complete pipeline (backfill -> rollups -> notability -> narrative).")
+    pipeline_parser = subparsers.add_parser("pipeline", aliases=["run-all"], help="Execute raw backfill -> agent handoff (canonical mode).")
     pipeline_parser.add_argument("--years", type=float, default=1.0, help="Years of history to backfill and report.")
     pipeline_parser.add_argument("--since", type=str, help="Start ISO timestamp (overrides --years for backfill/rollup/summarize).")
     pipeline_parser.add_argument("--until", type=str, help="End ISO timestamp (overrides --years for backfill/rollup/summarize).")
@@ -452,6 +468,8 @@ def handle_backfill(args: argparse.Namespace) -> int:
         repo_offset=start_index,
         repos_total_override=len(repositories),
         kill_after_n_records=getattr(args, "kill_after_n_records", None),
+        run_id=run.run_id,
+        raw_record_count_base=base_records,
     )
     run.records_ingested = base_records + int(summary["records_ingested"])
     if summary["interrupted"]:
@@ -752,6 +770,59 @@ def handle_progress_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_coverage_migration(args: argparse.Namespace) -> int:
+    """Keep migration non-destructive unless two explicit confirmations are present."""
+    try:
+        client = get_fulcra_client()
+    except FulcraAuthError as err:
+        print(f"Error: Fulcra client failed: {err}", file=sys.stderr, flush=True)
+        return 1
+    manager = HistoryCoverageManager(client)
+    plan = manager.migration_plan()
+    if args.plan:
+        print(json.dumps(plan, indent=2, sort_keys=True), flush=True)
+        return 0
+    if args.migrate:
+        if not args.yes:
+            print(
+                "Migration not started: review --plan, then pass --migrate --yes.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        result = manager.migrate_legacy()
+        print(json.dumps(result, sort_keys=True), flush=True)
+        return 0
+
+    if not args.yes or not args.confirm_delete_legacy_checkpoints:
+        print(
+            "Legacy deletion requires both --yes and "
+            "--confirm-delete-legacy-checkpoints. Nothing was deleted.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    existing_run_ids = {
+        coverage.run_id for coverage in manager.get_coverages(refresh=True)
+    }
+    missing = [
+        cohort["migration_run_id"]
+        for cohort in plan["cohorts"]
+        if cohort["migration_run_id"] not in existing_run_ids
+    ]
+    if missing:
+        print(
+            "Legacy deletion refused: migrate and verify all cohorts first. "
+            f"Missing run-level coverage: {missing}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    deleted = manager.delete_legacy_types()
+    print(f"Deleted legacy custom types: {', '.join(deleted) or 'none found'}", flush=True)
+    return 0
+
+
 def handle_pipeline(args: argparse.Namespace) -> int:
     """Run durable stages, then hand narration to the selected explicit mode."""
     reporter = _progress_reporter(args)
@@ -881,6 +952,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_publish_agent_narrative(args)
     elif args.command == "progress-status":
         return handle_progress_status(args)
+    elif args.command == "coverage-migration":
+        return handle_coverage_migration(args)
     elif args.command in ("pipeline", "run-all"):
         return handle_pipeline(args)
     else:

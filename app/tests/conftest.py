@@ -39,6 +39,11 @@ class MockFulcraClient:
         self.annotations.append(ann)
         return ann
 
+    def delete_annotation(self, annotation_id: str) -> Dict[str, str]:
+        annotation = next(item for item in self.annotations if item["id"] == annotation_id)
+        annotation["deleted_at"] = "deleted"
+        return {"id": annotation_id}
+
     def create_tags(self, tag_names: List[str]) -> List[Dict[str, str]]:
         result = []
         for name in tag_names:

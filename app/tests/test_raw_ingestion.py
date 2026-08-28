@@ -344,7 +344,7 @@ def test_ingest_items_does_not_treat_unrelated_range_checkpoint_as_covering(mock
     assert cp2.end_time == second_end
 
 
-def test_progress_record_count_is_bounded_by_milestones(mock_fulcra_client) -> None:
+def test_ingestion_progress_is_ephemeral_not_an_annotation_type(mock_fulcra_client) -> None:
     repo, identity = "acme/large", "bounded-dev"
     progress_messages = []
     items = [
@@ -363,23 +363,16 @@ def test_progress_record_count_is_bounded_by_milestones(mock_fulcra_client) -> N
         items, repo, identity, "2025-01-01T00:00:00Z", "2025-01-31T23:59:59Z"
     )
     assert count == 250 and completed is not None and completed.status == "completed"
-    progress_source = next(
-        annotation["fulcra_source_id"] for annotation in mock_fulcra_client.annotations
-        if annotation["name"] == "GitHub Backfill Progress"
-    )
-    progress_records = [
-        record for record in mock_fulcra_client.moment_records
-        if progress_source in record.get("sources", [])
-    ]
-    assert len(progress_records) == 2
-    assert len(mock_fulcra_client.duration_records) == 1
-    assert len(progress_records) < len(items) / 10
+    annotation_names = {item["name"] for item in mock_fulcra_client.annotations}
+    assert "GitHub Backfill Progress" not in annotation_names
+    assert "GitHub Backfill Coverage" not in annotation_names
+    assert mock_fulcra_client.duration_records == []
     assert any("25 new" in message for message in progress_messages)
     assert any("250 new" in message for message in progress_messages)
     assert "status=completed" in progress_messages[-1]
 
 
-def test_replay_after_progress_loss_does_not_duplicate_raw_records(mock_fulcra_client) -> None:
+def test_replay_without_cursor_records_does_not_duplicate_raw_records(mock_fulcra_client) -> None:
     repo, identity = "acme/crash", "crash-dev"
     items = [
         GitHubActivityItem(
@@ -394,16 +387,11 @@ def test_replay_after_progress_loss_does_not_duplicate_raw_records(mock_fulcra_c
         kill_after_n=5,
     )
     assert first_count == 5
-    # Simulate a hard crash where the last progress write was unavailable,
-    # while its five raw writes remained durable.
-    progress_source = next(
-        annotation["fulcra_source_id"] for annotation in mock_fulcra_client.annotations
-        if annotation["name"] == "GitHub Backfill Progress"
+    # No cursor annotation exists; replay relies entirely on raw fingerprints.
+    assert all(
+        annotation["name"] != "GitHub Backfill Progress"
+        for annotation in mock_fulcra_client.annotations
     )
-    mock_fulcra_client.moment_records = [
-        record for record in mock_fulcra_client.moment_records
-        if progress_source not in record.get("sources", [])
-    ]
     second_count, completed = RawActivityIngestor(
         mock_fulcra_client, progress_interval=100
     ).ingest_items(
