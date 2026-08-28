@@ -120,17 +120,23 @@ def get_narrative_filename(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     written_at: Optional[datetime] = None,
+    suffix: str = "",
 ) -> str:
-    """Generate deterministic filename for narrative markdown output."""
+    """Generate deterministic filename for narrative markdown output.
+
+    `suffix` (e.g. "_sources") lets companion artifacts share the same
+    identity/range/writing-date naming convention as the main narrative
+    while remaining a visibly distinct sibling file.
+    """
     clean_identity = _safe_path_component(github_identity)
     if start_time and end_time:
         written = (written_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         return (
             f"{prefix}_{clean_identity}_{start_time[:10]}_to_{end_time[:10]}_"
-            f"written_{written:%Y-%m-%d}.md"
+            f"written_{written:%Y-%m-%d}{suffix}.md"
         )
     clean_label = _safe_path_component(range_label, "full")
-    return f"{prefix}_{clean_identity}_{clean_label}.md"
+    return f"{prefix}_{clean_identity}_{clean_label}{suffix}.md"
 
 
 def get_fulcra_narrative_path(
@@ -138,13 +144,14 @@ def get_fulcra_narrative_path(
     start_time: str,
     end_time: str,
     written_at: Optional[datetime] = None,
+    suffix: str = "",
 ) -> str:
     """Return an organized, readable path in the owner's Fulcra file store."""
     written = (written_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     clean_identity = _safe_path_component(github_identity)
     filename = get_narrative_filename(
         github_identity, "", start_time=start_time, end_time=end_time,
-        written_at=written,
+        written_at=written, suffix=suffix,
     )
     return f"/engineering-journeys/{clean_identity}/{written:%Y}/{filename}"
 
@@ -157,10 +164,16 @@ def upload_narrative_document(
     end_time: str,
     written_at: Optional[datetime] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    suffix: str = "",
 ) -> str:
-    """Upload UTF-8 markdown with bounded retry and return its path."""
+    """Upload UTF-8 markdown with bounded retry and return its path.
+
+    `suffix` lets a companion artifact (e.g. a sources appendix) land as a
+    same-folder sibling of the main narrative using the same identity/range/
+    writing-date naming convention.
+    """
     filepath = get_fulcra_narrative_path(
-        github_identity, start_time, end_time, written_at=written_at
+        github_identity, start_time, end_time, written_at=written_at, suffix=suffix,
     )
     payload = doc_content.encode("utf-8")
 

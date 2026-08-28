@@ -753,10 +753,14 @@ def handle_publish_agent_narrative(args: argparse.Namespace) -> int:
         "[agent narration] Grounded narrative validated and published.",
         markdown_path=published.markdown_path,
         fulcra_path=published.fulcra_path,
+        sources_markdown_path=published.sources_markdown_path,
+        sources_fulcra_path=published.sources_fulcra_path,
     )
     reporter.finish_pipeline()
     _emit(f"[agent narration] Local markdown: {published.markdown_path}")
     _emit(f"[agent narration] Fulcra file: {published.fulcra_path}")
+    _emit(f"[agent narration] Local sources file: {published.sources_markdown_path}")
+    _emit(f"[agent narration] Fulcra sources file: {published.sources_fulcra_path}")
     return 0
 
 

@@ -265,6 +265,9 @@ def test_raw_complete_resume_skips_github_reuses_window_and_publishes(
     with patch("cli.get_fulcra_client", return_value=mock_fulcra_client):
         assert handle_publish_agent_narrative(publish_args) == 0
     assert (tmp_path / "journey.md").is_file()
+    assert (tmp_path / "journey_sources.md").is_file()
+    assert "Raw Fulcra Record ID |" not in (tmp_path / "journey.md").read_text(encoding="utf-8")
+    assert "Raw Fulcra Record ID |" in (tmp_path / "journey_sources.md").read_text(encoding="utf-8")
     assert PipelineRunManager(mock_fulcra_client).get_runs("resume-dev")[0].stage == "published"
 
     events = [

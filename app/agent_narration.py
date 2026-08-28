@@ -67,6 +67,10 @@ class PublishedNarrative:
     fulcra_path: str
     filename: str
     document: str
+    sources_markdown_path: str
+    sources_fulcra_path: str
+    sources_filename: str
+    sources_document: str
 
 
 def _clean_text(value: Any, limit: int) -> str:
@@ -552,8 +556,16 @@ def _escape_table(value: Any) -> str:
 
 
 def _format_document(
-    handoff: Dict[str, Any], response: Dict[str, Any], generated_at: datetime
+    handoff: Dict[str, Any],
+    response: Dict[str, Any],
+    generated_at: datetime,
+    sources_filename: str,
 ) -> str:
+    """Render the readable narrative: story, sections, and a short evidence
+    summary that points to the companion sources file rather than embedding
+    every raw record inline. Keeps the primary artifact easy to read even
+    when the underlying evidence spans hundreds or thousands of records.
+    """
     metadata = handoff["metadata"]
     evidence = _known_evidence(handoff)
     section_text = "\n\n".join(
@@ -566,6 +578,49 @@ def _format_document(
         + " |"
         for section in response["sections"]
     )
+    repository_count = len({item["repository"] for item in evidence.values()})
+    return (
+        f"# Engineering Journey: {metadata['github_identity']}\n\n"
+        f"**Range:** `{metadata['start_time'][:10]}` to `{metadata['end_time'][:10]}`\n"
+        f"**Written:** `{format_iso(generated_at)}`\n\n"
+        "## Story Overview\n\n"
+        f"{response['overview']}\n\n"
+        "## Engineering Journey\n\n"
+        f"{section_text}\n\n---\n\n"
+        "## Provenance\n\n"
+        "The narrative was interpreted ephemerally from durable raw Fulcra records. "
+        "No rollups, notability scores, or LLM summaries were persisted as source data.\n\n"
+        f"This journey cites **{len(evidence)} raw GitHub activity record"
+        f"{'s' if len(evidence) != 1 else ''}** across **{repository_count} "
+        f"repositor{'ies' if repository_count != 1 else 'y'}**. Every record ID cited "
+        "below and in each section above resolves to a durable Fulcra record.\n\n"
+        "### Section Evidence\n\n"
+        "| Section | Supporting Raw Fulcra Record IDs |\n"
+        "| --- | --- |\n"
+        f"{section_rows}\n\n"
+        "### Full Raw Evidence\n\n"
+        f"The complete list of raw GitHub activity records (ID, date, repository, "
+        f"type, title, and GitHub URL) backing this narrative is in the companion "
+        f"sources file, published alongside this document:\n\n"
+        f"`{sources_filename}`\n"
+    )
+
+
+def _format_sources_document(
+    handoff: Dict[str, Any],
+    response: Dict[str, Any],
+    generated_at: datetime,
+    narrative_filename: str,
+) -> str:
+    """Render the full raw-record provenance table as its own artifact.
+
+    This is the companion file for `_format_document`'s "Full Raw Evidence"
+    pointer: every raw record cited by the narrative, with its exact Fulcra
+    record ID, date, repository, type, title, and GitHub URL. Kept separate
+    so the main narrative stays readable regardless of evidence volume.
+    """
+    metadata = handoff["metadata"]
+    evidence = _known_evidence(handoff)
     raw_rows = "\n".join(
         f"| `{raw_id}` | `{item['event_timestamp'][:10]}` | "
         f"`{_escape_table(item['repository'])}` | `{_escape_table(item['activity_type'])}` | "
@@ -575,25 +630,23 @@ def _format_document(
         )
     )
     return (
-        f"# Engineering Journey: {metadata['github_identity']}\n\n"
+        f"# Engineering Journey Sources: {metadata['github_identity']}\n\n"
         f"**Range:** `{metadata['start_time'][:10]}` to `{metadata['end_time'][:10]}`\n"
         f"**Written:** `{format_iso(generated_at)}`\n\n"
-        "## Story Overview\n\n"
-        f"{response['overview']}\n\n"
-        "## Engineering Journey\n\n"
-        f"{section_text}\n\n---\n\n"
-        "## Provenance Appendix\n\n"
-        "The narrative was interpreted ephemerally from durable raw Fulcra records. "
-        "No rollups, notability scores, or LLM summaries were persisted as source data.\n\n"
-        "### Section Evidence\n\n"
-        "| Section | Supporting Raw Fulcra Record IDs |\n"
-        "| --- | --- |\n"
-        f"{section_rows}\n\n"
+        f"This is the full raw-record provenance appendix for the narrative published "
+        f"as `{narrative_filename}`. It lists every raw Fulcra GitHub activity record "
+        f"that narrative cites.\n\n"
         "### Raw GitHub Activity Evidence\n\n"
         "| Raw Fulcra Record ID | Date | Repository | Type | Title/Summary | GitHub URL |\n"
         "| --- | --- | --- | --- | --- | --- |\n"
         f"{raw_rows}\n"
     )
+
+
+def _sibling_sources_path(markdown_path: str) -> str:
+    """Derive a same-folder sources path from an explicit narrative output path."""
+    path = Path(markdown_path)
+    return str(path.with_name(f"{path.stem}_sources{path.suffix}"))
 
 
 def publish_agent_narrative(
@@ -605,11 +658,19 @@ def publish_agent_narrative(
     written_at: Optional[datetime] = None,
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> PublishedNarrative:
-    """Validate ephemeral agent prose, render it, and publish only the artifact."""
+    """Validate ephemeral agent prose, render it, and publish two artifacts.
+
+    The main narrative stays readable regardless of evidence volume: it
+    contains the story, sections, and a short evidence summary. The full
+    raw-record provenance table (which can run to hundreds or thousands of
+    rows for a real ingestion window) is rendered as a separate companion
+    "sources" file, uploaded alongside the narrative in the same Fulcra
+    folder using the same identity/range/writing-date naming convention.
+    """
     normalized = validate_agent_response(handoff, response)
     metadata = handoff["metadata"]
     generated_at = written_at or datetime.now(timezone.utc)
-    document = _format_document(handoff, normalized, generated_at)
+
     filename = get_narrative_filename(
         metadata["github_identity"],
         metadata["range_label"],
@@ -617,9 +678,31 @@ def publish_agent_narrative(
         end_time=metadata["end_time"],
         written_at=generated_at,
     )
+    sources_filename = get_narrative_filename(
+        metadata["github_identity"],
+        metadata["range_label"],
+        start_time=metadata["start_time"],
+        end_time=metadata["end_time"],
+        written_at=generated_at,
+        suffix="_sources",
+    )
+
+    document = _format_document(handoff, normalized, generated_at, sources_filename)
+    sources_document = _format_sources_document(
+        handoff, normalized, generated_at, filename
+    )
+
     markdown_path = output_path or str(Path(output_dir) / filename)
+    sources_markdown_path = (
+        _sibling_sources_path(output_path)
+        if output_path
+        else str(Path(output_dir) / sources_filename)
+    )
     Path(markdown_path).parent.mkdir(parents=True, exist_ok=True)
     Path(markdown_path).write_text(document, encoding="utf-8")
+    Path(sources_markdown_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(sources_markdown_path).write_text(sources_document, encoding="utf-8")
+
     fulcra_path = upload_narrative_document(
         client,
         document,
@@ -629,4 +712,23 @@ def publish_agent_narrative(
         written_at=generated_at,
         event_callback=event_callback,
     )
-    return PublishedNarrative(markdown_path, fulcra_path, filename, document)
+    sources_fulcra_path = upload_narrative_document(
+        client,
+        sources_document,
+        metadata["github_identity"],
+        metadata["start_time"],
+        metadata["end_time"],
+        written_at=generated_at,
+        event_callback=event_callback,
+        suffix="_sources",
+    )
+    return PublishedNarrative(
+        markdown_path,
+        fulcra_path,
+        filename,
+        document,
+        sources_markdown_path,
+        sources_fulcra_path,
+        sources_filename,
+        sources_document,
+    )
