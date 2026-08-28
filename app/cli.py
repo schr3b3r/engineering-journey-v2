@@ -179,7 +179,10 @@ def _confirm_backfill_plan(
     _emit(f"Repository scope:             {args.repo or 'all accessible repositories'}")
     _emit(f"Mode:                         {'discovery only; no writes' if args.dry_run else 'write durable records to Fulcra'}")
     if pipeline and not args.dry_run:
-        _emit("Stages:                       backfill → rollups → notability → LLM synthesis → narrative → Fulcra file")
+        if getattr(args, "narration_mode", "agent") == "agent":
+            _emit("Stages:                       backfill raw history → agent evidence handoff → this LLM writes → validated Fulcra file")
+        else:
+            _emit("Stages:                       backfill → legacy derived stages → selected narration mode")
     else:
         _emit("Stages:                       repository discovery → coverage checks → raw ingestion")
     _emit("=" * 60)
@@ -461,9 +464,9 @@ def handle_agent_handoff(args: argparse.Namespace) -> int:
         exact_start_time=getattr(args, "since", None),
         exact_end_time=getattr(args, "until", None),
     )
-    if not handoff["periods"]:
+    if not handoff["chunks"]:
         print(
-            "Error: no paced rollup periods were found for this identity/range.",
+            "Error: no durable raw GitHub records were found for this identity/range.",
             file=sys.stderr,
             flush=True,
         )
@@ -472,7 +475,8 @@ def handle_agent_handoff(args: argparse.Namespace) -> int:
         json.dump(handoff, file_handle, indent=2, ensure_ascii=False)
     _emit(
         f"[agent narration] Handoff ready: {args.output} "
-        f"({len(handoff['periods'])} chronological periods)."
+        f"({handoff['metadata']['raw_record_count']} raw records in "
+        f"{len(handoff['chunks'])} adaptive chunks)."
     )
     _emit(
         "[agent narration] The LLM already running this skill must now read "
@@ -546,13 +550,8 @@ def handle_pipeline(args: argparse.Namespace) -> int:
         _emit("[pipeline] Dry run complete; no derived or narrative stages were run.")
         return 0
 
-    _emit("\n[pipeline 2/3] Building rollups and notability signals from the same immutable window.")
-    result = handle_rollup(args)
-    if result != 0:
-        return result
-
     if narration_mode == "agent":
-        _emit("\n[pipeline 3/3] Preparing grounded context for this running agent.")
+        _emit("\n[pipeline 2/2] Preparing adaptive raw evidence for this running agent.")
         handoff_output = args.handoff_output or (
             f"engineering_journey_handoff_{args.identity}_{args.since[:10]}_to_{args.until[:10]}.json"
         )
@@ -565,6 +564,12 @@ def handle_pipeline(args: argparse.Namespace) -> int:
             output=handoff_output,
         )
         return handle_agent_handoff(handoff_args)
+
+    # Legacy derived layers are retained only for explicit standalone modes.
+    _emit("\n[pipeline 2/3] Explicit standalone mode: building legacy rollups/notability.")
+    result = handle_rollup(args)
+    if result != 0:
+        return result
 
     if narration_mode == "external":
         import subprocess

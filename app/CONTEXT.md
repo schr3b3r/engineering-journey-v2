@@ -32,12 +32,13 @@ no bundled LLM provider dependency.
 (See `architecture.md` at the repo root for the full architecture writeup this summary was excerpted from.)
 
 ## Current State
-Canonical narration now uses the LLM already running the skill. Default
-`pipeline` performs deterministic durable stages and exports a bounded grounded
-handoff; the current agent authors schema-constrained overview/period prose;
-`publish-agent-narrative` validates exact context/period/source completeness,
-persists summaries, verifies provenance, and uploads. No external model login
-or API key is required. External-provider code is opt-in standalone mode only.
+Canonical narration now uses the LLM already running the skill over durable raw
+Fulcra history. Default `pipeline` backfills only missing raw coverage, then
+exports adaptive in-memory evidence chunks; the current agent synthesizes
+cross-repository overview/sections; `publish-agent-narrative` validates exact
+raw IDs and chronology and uploads the final artifact. Rollups, notability
+signals, and LLM summaries are neither required nor persisted. No external
+model login/API key is required. External-provider code is opt-in legacy mode.
 Direct Hermes URL installs include a referenced bootstrap script that obtains
 the one canonical runtime instead of assuming unbundled `app/` files exist.
 
@@ -89,7 +90,7 @@ yet started. Consult both, but don't duplicate one into the other.
 (Newest at the top. One entry per meaningful decision — not a full
 chronological journal, just high-signal architectural notes.)
 
-- **(post-#12 architecture correction)** Running-agent narration is canonical: the app is context preparation + validation/publishing, not a second model client. `agent_narration.py` bridges durable evidence to the surrounding LLM with exact schema/source validation. Default pipeline never checks provider credentials. A referenced bootstrap script fixes Hermes direct-install bundling without duplicating app code.
+- **(issues #14 / post-#12 architecture correction)** Raw Fulcra history is the durable engineering memory; interpretation is ephemeral. The running agent adaptively interprets compact raw evidence with exact record IDs/URLs. Default pipeline does not build derived records or check provider credentials. The publisher stores only the final file artifact. A referenced bootstrap fixes direct Hermes installs without duplicating app code.
 
 - **(post-#11)** Guided, observable execution: account and run-plan approval are distinct user decisions presented together before work. EOF, cancellation, and unconfirmed non-interactive sessions fail closed. `--yes` is valid only after an agent relays the account/plan and obtains explicit approval. Optional progress callbacks keep libraries reusable while CLI/script paths flush continuous contextual output.
 - **(post-#9)** Automatic narrative artifact storage: successful generation includes a Fulcra SDK `upload_file` write by default. Owner paths are organized by identity/writing year and filenames encode activity bounds plus writing date. Programmatic callers can explicitly opt out with `upload_to_fulcra=False`; CLI users receive automatic storage and a printed path.

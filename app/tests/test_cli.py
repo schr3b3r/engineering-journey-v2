@@ -400,9 +400,10 @@ def test_default_agent_pipeline_never_checks_external_provider() -> None:
         return 0
 
     with patch("cli.handle_backfill", side_effect=completed_backfill):
-        with patch("cli.handle_rollup", return_value=0):
+        with patch("cli.handle_rollup", return_value=0) as derived_layers:
             with patch("cli.handle_agent_handoff", return_value=0) as handoff:
                 with patch("subprocess.run") as external_provider:
                     assert handle_pipeline(args) == 0
     external_provider.assert_not_called()
+    derived_layers.assert_not_called()
     handoff.assert_called_once()

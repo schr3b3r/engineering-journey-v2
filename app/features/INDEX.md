@@ -12,10 +12,10 @@ status changes.
 | [m3_raw_ingestion.md](m3_raw_ingestion.md) | done | Ingestion of raw GitHub activity items into "GitHub Activity Raw" records with event-time recorded_at, filterable tags, sources, and checkpoint integration |
 | [m4_multi_repo_backfill.md](m4_multi_repo_backfill.md) | done | Multi-repo discovery and uniform daily-granularity backfill across multi-year windows with existence pre-checks, resumability, and performance metrics |
 | [m5_backward_forward_extension.md](m5_backward_forward_extension.md) | done | Backward/forward extension of existing backfills into past/future without reprocessing or duplicating already-covered ranges |
-| [m6_activity_rollups.md](m6_activity_rollups.md) | done | Precomputed day/week/month/quarter/year activity rollups with hand-rolled aggregation and provenance chains |
-| [m7_rollup_summarization.md](m7_rollup_summarization.md) | done | Provider-free synthesis by the LLM already running the skill, with grounded handoff and validated write-back |
-| [m8_notability_signal.md](m8_notability_signal.md) | done | First-pass notability signal formula using NumericAnnotation custom records, score in value, and baseline comparison in note |
-| [m9_narrative_generation.md](m9_narrative_generation.md) | done | Markdown narrative generator reading rollups+signals, producing paced markdown with provenance appendix |
+| [m6_activity_rollups.md](m6_activity_rollups.md) | done | Legacy standalone compatibility layer; not created or required by canonical raw-history storytelling |
+| [m7_rollup_summarization.md](m7_rollup_summarization.md) | done | Ephemeral provider-free storytelling by the running LLM over adaptively chunked raw Fulcra history |
+| [m8_notability_signal.md](m8_notability_signal.md) | done | Legacy standalone compatibility layer; not created or required by canonical raw-history storytelling |
+| [m9_narrative_generation.md](m9_narrative_generation.md) | done | Running-agent Markdown storytelling over raw Fulcra evidence with exact provenance and automatic upload |
 | [m10_packaging.md](m10_packaging.md) | done | Installable, agent-agnostic skill packaging: root SKILL.md, runnable app/ CLI, OAuth device flow with gh confirmation |
 
 ## Status values

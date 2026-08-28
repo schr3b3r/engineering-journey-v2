@@ -32,6 +32,7 @@ class GitHubActivityItem:
     title_or_summary: str
     url: str
     raw_payload: Dict[str, Any] = field(default_factory=dict)
+    record_id: Optional[str] = None  # Real Fulcra raw record ID after retrieval
 
 
 class GitHubAPISpike:
